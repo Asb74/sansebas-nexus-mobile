@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'routes.dart';
-import 'theme.dart';
+import '../core/theme/app_theme.dart';
 
 class SansebasNexusMobileApp extends StatelessWidget {
   const SansebasNexusMobileApp({super.key});
@@ -11,7 +11,7 @@ class SansebasNexusMobileApp extends StatelessWidget {
     return MaterialApp(
       title: 'Sansebas Nexus Mobile',
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.light,
+      theme: AppTheme.lightTheme,
       initialRoute: AppRoutes.splash,
       routes: AppRoutes.routes,
     );
