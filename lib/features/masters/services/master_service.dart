@@ -81,7 +81,7 @@ class MasterService {
     }
   }
 
-  Future<List<T>> _loadCollection<T>(
+  Future<List<T>> _loadCollection<T extends Object>(
     String masterId,
     T Function(String id, Map<String, dynamic> data) mapper,
   ) async {
@@ -100,7 +100,7 @@ class MasterService {
     return items;
   }
 
-  static int _compareMasterItems(Object a, Object b) {
+  static int _compareMasterItems<T extends Object>(T a, T b) {
     final orderComparison = _itemOrder(a).compareTo(_itemOrder(b));
     if (orderComparison != 0) return orderComparison;
     return _itemName(a).compareTo(_itemName(b));
@@ -126,7 +126,7 @@ class MasterService {
     };
   }
 
-  static bool _hasName(Object item) {
+  static bool _hasName<T extends Object>(T item) {
     return switch (item) {
       AreaMaster(:final name) => name.isNotEmpty,
       TopicMaster(:final name) => name.isNotEmpty,
