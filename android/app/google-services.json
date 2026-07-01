@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "18828281640",
+    "project_id": "sansebas-nexus",
+    "storage_bucket": "sansebas-nexus.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:18828281640:android:3f4fcc5585fb9c66c3721d",
+        "android_client_info": {
+          "package_name": "com.sansebas.nexus.mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB1vHkIkbDsQ5LGlUXtbyhnV4ekOg7mrwM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
