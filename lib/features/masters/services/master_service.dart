@@ -39,12 +39,7 @@ class MasterService {
       );
       final topics = await _loadCollection<TopicMaster>(
         'topics',
-        (id, data) => TopicMaster(
-          id: id,
-          name: _readName(data),
-          areaId: _readNullableString(data['areaId']),
-          order: _readOrder(data),
-        ),
+        TopicMaster.fromFirestore,
       );
       final types = await _loadCollection<NoteTypeMaster>(
         'types',
