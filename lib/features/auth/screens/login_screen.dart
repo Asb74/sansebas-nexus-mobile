@@ -1,4 +1,3 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../../../app/routes.dart';
@@ -23,6 +22,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _masterService = MasterService();
 
   bool _isLoading = false;
+  bool _obscurePassword = true;
   String? _errorMessage;
 
   @override
@@ -51,7 +51,6 @@ class _LoginScreenState extends State<LoginScreen> {
         _emailController.text,
         _passwordController.text,
       );
-      await _authService.validateCurrentUserAuthorization();
       await _masterService.loadMasters(forceRefresh: true);
 
       if (!mounted) return;
@@ -60,28 +59,13 @@ class _LoginScreenState extends State<LoginScreen> {
         AppRoutes.home,
         (route) => false,
       );
-    } on FirebaseAuthException catch (error) {
-      setState(() => _errorMessage = _firebaseAuthMessage(error));
-    } on AuthAuthorizationException catch (error) {
+    } on AuthLoginException catch (error) {
       setState(() => _errorMessage = error.message);
     } catch (_) {
-      setState(
-        () => _errorMessage = 'No se pudo iniciar sesión. Inténtalo de nuevo.',
-      );
+      setState(() => _errorMessage = 'Error inesperado.');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
-  }
-
-  String _firebaseAuthMessage(FirebaseAuthException error) {
-    return switch (error.code) {
-      'invalid-email' => 'El correo no tiene un formato válido.',
-      'user-disabled' => 'Este usuario está deshabilitado en Firebase Auth.',
-      'user-not-found' || 'wrong-password' || 'invalid-credential' =>
-        'Correo o contraseña incorrectos.',
-      'too-many-requests' => 'Demasiados intentos. Espera unos minutos.',
-      _ => 'No se pudo iniciar sesión. Revisa tus credenciales.',
-    };
   }
 
   @override
@@ -136,12 +120,27 @@ class _LoginScreenState extends State<LoginScreen> {
                     TextFormField(
                       controller: _passwordController,
                       enabled: !_isLoading,
-                      obscureText: true,
+                      obscureText: _obscurePassword,
                       textInputAction: TextInputAction.done,
                       onFieldSubmitted: (_) => _isLoading ? null : _signIn(),
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Contraseña',
-                        prefixIcon: Icon(Icons.lock_outline),
+                        prefixIcon: const Icon(Icons.lock_outline),
+                        suffixIcon: IconButton(
+                          tooltip: _obscurePassword
+                              ? 'Mostrar contraseña'
+                              : 'Ocultar contraseña',
+                          icon: Icon(
+                            _obscurePassword
+                                ? Icons.visibility_outlined
+                                : Icons.visibility_off_outlined,
+                          ),
+                          onPressed: _isLoading
+                              ? null
+                              : () => setState(
+                                    () => _obscurePassword = !_obscurePassword,
+                                  ),
+                        ),
                       ),
                       validator: (value) {
                         if (value == null || value.isEmpty) {
