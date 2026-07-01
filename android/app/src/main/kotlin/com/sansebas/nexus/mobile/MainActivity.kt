@@ -1,4 +1,4 @@
-package com.example.sansebas_nexus_mobile
+package com.sansebas.nexus.mobile
 
 import io.flutter.embedding.android.FlutterActivity
 
