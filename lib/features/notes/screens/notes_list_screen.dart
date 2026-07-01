@@ -5,9 +5,9 @@ class NotesListScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(
-      appBar: AppBar(title: Text('Lista de notas')),
-      body: Center(child: Text('Pantalla provisional para listar notas.')),
+    return Scaffold(
+      appBar: AppBar(title: const Text('Lista de notas')),
+      body: const Center(child: Text('Pantalla provisional para listar notas.')),
     );
   }
 }
