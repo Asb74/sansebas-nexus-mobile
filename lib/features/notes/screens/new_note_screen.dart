@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../masters/models/area_master.dart';
@@ -7,6 +8,7 @@ import '../../masters/models/topic_master.dart';
 import '../../masters/services/master_service.dart';
 import '../models/mobile_note.dart';
 import '../models/sync_status.dart';
+import '../services/firebase_sync_service.dart';
 import '../widgets/attachment_action_button.dart';
 import '../widgets/note_text_field.dart';
 
@@ -22,11 +24,14 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   final _tagsController = TextEditingController();
   final _contentController = TextEditingController();
   final _masterService = MasterService();
+  final _firebaseSyncService = FirebaseSyncService();
+  final _uuid = const Uuid();
 
   late final Future<MasterData> _mastersFuture;
   AreaMaster? _selectedArea;
   TopicMaster? _selectedTopic;
   NoteTypeMaster? _selectedType;
+  bool _isSaving = false;
 
   @override
   void initState() {
@@ -69,64 +74,95 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
     if (area == null) return masters.topics;
 
     final filtered = masters.topics
-        .where((topic) => topic.areaId == null || topic.areaId == area.id)
+        .where((topic) => topic.areaId == area.id)
         .toList(growable: false);
-    return filtered.isEmpty ? masters.topics : filtered;
+    if (filtered.isNotEmpty) return filtered;
+
+    final generalTopics = masters.topics
+        .where((topic) => topic.name.trim().toLowerCase() == 'general')
+        .toList(growable: false);
+    return generalTopics;
   }
 
-  void _saveNote() {
+  Future<void> _saveNote() async {
+    if (_isSaving) return;
+
     final title = _titleController.text.trim();
-    final area = _selectedArea?.name.trim() ?? '';
-    final topic = _selectedTopic?.name.trim() ?? '';
-    final type = _selectedType?.name.trim() ?? '';
+    final area = _selectedArea;
+    final topic = _selectedTopic;
+    final type = _selectedType;
     final content = _contentController.text.trim();
 
     if (title.isEmpty) {
       _showValidationMessage('El título es obligatorio.');
       return;
     }
-    if (area.isEmpty) {
+    if (area == null) {
       _showValidationMessage('El área es obligatoria.');
       return;
     }
-    if (topic.isEmpty) {
+    if (topic == null) {
       _showValidationMessage('El tema es obligatorio.');
       return;
     }
-    if (type.isEmpty) {
+    if (type == null) {
       _showValidationMessage('El tipo es obligatorio.');
       return;
     }
     if (content.isEmpty) {
-      _showValidationMessage('Añade contenido o un adjunto cuando esté disponible.');
+      _showValidationMessage('El contenido es obligatorio.');
       return;
     }
 
+    final uid = _firebaseSyncService.currentUserId;
+    if (uid == null || uid.isEmpty) {
+      _showValidationMessage('No tienes permiso para guardar notas');
+      return;
+    }
+
+    setState(() => _isSaving = true);
+
     final now = DateTime.now();
     final note = MobileNote(
-      mobileNoteId: now.millisecondsSinceEpoch.toString(),
+      mobileNoteId: _uuid.v4(),
       title: title,
-      area: area,
-      topic: topic,
-      type: type,
+      areaId: area.id,
+      area: area.name,
+      topicId: topic.id,
+      topic: topic.name,
+      typeId: type.id,
+      type: type.name,
       tags: _parseTags(),
       content: content,
       source: 'mobile',
       createdAt: now,
       updatedAt: now,
-      syncStatus: SyncStatus.pending,
-      userId: 'firebase_user_pending_note_persistence',
-      deviceId: 'local_device_pending',
+      syncStatus: SyncStatus.uploaded,
+      userId: uid,
+      deviceId: await _firebaseSyncService.readDeviceId(),
       attachmentsCount: 0,
     );
 
-    // The note is intentionally kept only in memory until a later persistence phase.
-    debugPrint('Nota preparada en memoria: ${note.mobileNoteId}');
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Nota preparada para sincronización')),
-    );
-    Navigator.pop(context);
+    try {
+      await _firebaseSyncService.createTextNote(note);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Nota guardada para sincronización')),
+      );
+      Navigator.pop(context);
+    } on FirebaseSyncException catch (error) {
+      debugPrint('Error controlado guardando nota: $error');
+      if (!mounted) return;
+      _showValidationMessage(error.userMessage);
+    } catch (error) {
+      debugPrint('Error no controlado guardando nota: $error');
+      if (!mounted) return;
+      _showValidationMessage('No se pudo guardar la nota');
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
+    }
   }
 
   @override
@@ -181,7 +217,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
                         value: _selectedArea,
                         items: masters.areas,
                         itemLabel: (area) => area.name,
-                        onChanged: (area) => setState(() {
+                        onChanged: _isSaving ? null : (area) => setState(() {
                           _selectedArea = area;
                           _selectedTopic = null;
                         }),
@@ -192,7 +228,9 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
                         value: _selectedTopic,
                         items: topics,
                         itemLabel: (topic) => topic.name,
-                        onChanged: (topic) => setState(() => _selectedTopic = topic),
+                        onChanged: _isSaving
+                            ? null
+                            : (topic) => setState(() => _selectedTopic = topic),
                       ),
                       const SizedBox(height: 16),
                       _MasterDropdown<NoteTypeMaster>(
@@ -200,7 +238,9 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
                         value: _selectedType,
                         items: masters.types,
                         itemLabel: (type) => type.name,
-                        onChanged: (type) => setState(() => _selectedType = type),
+                        onChanged: _isSaving
+                            ? null
+                            : (type) => setState(() => _selectedType = type),
                       ),
                       const SizedBox(height: 16),
                       NoteTextField(
@@ -254,13 +294,18 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
                       ),
                       const SizedBox(height: 32),
                       FilledButton.icon(
-                        onPressed: _saveNote,
-                        icon: const Icon(Icons.check_circle_outline),
-                        label: const Text('Guardar nota'),
+                        onPressed: _isSaving ? null : _saveNote,
+                        icon: _isSaving
+                            ? const SizedBox.square(
+                                dimension: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.check_circle_outline),
+                        label: Text(_isSaving ? 'Guardando...' : 'Guardar nota'),
                       ),
                       const SizedBox(height: 12),
                       OutlinedButton.icon(
-                        onPressed: () => Navigator.pop(context),
+                        onPressed: _isSaving ? null : () => Navigator.pop(context),
                         icon: const Icon(Icons.close_outlined),
                         label: const Text('Cancelar'),
                       ),
@@ -289,7 +334,7 @@ class _MasterDropdown<T> extends StatelessWidget {
   final T? value;
   final List<T> items;
   final String Function(T item) itemLabel;
-  final ValueChanged<T?> onChanged;
+  final ValueChanged<T?>? onChanged;
 
   @override
   Widget build(BuildContext context) {
