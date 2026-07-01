@@ -44,9 +44,14 @@ class NotesListScreen extends StatelessWidget {
                     final note = notes[index];
                     return Card(
                       child: ListTile(
+                        leading: note.attachmentsCount > 0
+                            ? const Icon(Icons.attach_file_outlined)
+                            : null,
                         title: Text(note.title),
                         subtitle: Text(
-                          '${note.area} · ${note.topic} · ${note.type}\n${_formatDate(note.createdAt)} · ${note.syncStatus.value}',
+                          '${note.area} · ${note.topic} · ${note.type}\n'
+                          '${_formatDate(note.createdAt)} · ${note.syncStatus.value}'
+                          '${note.attachmentsCount > 0 ? ' · ${note.attachmentsCount} adj.' : ''}',
                         ),
                         isThreeLine: true,
                       ),

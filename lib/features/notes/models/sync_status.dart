@@ -3,11 +3,12 @@ enum SyncStatus {
   uploading,
   uploaded,
   imported,
+  deleted,
   error;
 
   String get value => name;
 
-  bool get isTerminal => this == imported || this == error;
+  bool get isTerminal => this == imported || this == deleted || this == error;
 
   static SyncStatus fromValue(String? value) {
     return SyncStatus.values.firstWhere(

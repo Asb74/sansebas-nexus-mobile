@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 
@@ -6,8 +8,10 @@ import '../../masters/models/area_master.dart';
 import '../../masters/models/note_type_master.dart';
 import '../../masters/models/topic_master.dart';
 import '../../masters/services/master_service.dart';
+import '../models/mobile_attachment.dart';
 import '../models/mobile_note.dart';
 import '../models/sync_status.dart';
+import '../services/attachment_service.dart';
 import '../services/firebase_sync_service.dart';
 import '../widgets/attachment_action_button.dart';
 import '../widgets/note_text_field.dart';
@@ -25,6 +29,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   final _contentController = TextEditingController();
   final _masterService = MasterService();
   final _firebaseSyncService = FirebaseSyncService();
+  final _attachmentService = AttachmentService();
   final _uuid = const Uuid();
 
   late final Future<MasterData> _mastersFuture;
@@ -32,11 +37,14 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   TopicMaster? _selectedTopic;
   NoteTypeMaster? _selectedType;
   bool _isSaving = false;
+  late String _draftMobileNoteId;
+  final List<MobileAttachment> _pendingAttachments = <MobileAttachment>[];
 
   @override
   void initState() {
     super.initState();
     _mastersFuture = _masterService.loadMasters();
+    _draftMobileNoteId = _uuid.v4();
   }
 
   @override
@@ -53,6 +61,49 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
         content: Text('Función pendiente de implementar en una fase posterior'),
       ),
     );
+  }
+
+
+  Future<void> _pickImageFromCamera() async {
+    if (_isSaving) return;
+    try {
+      final attachment = await _attachmentService.pickImageFromCamera(
+        mobileNoteId: _draftMobileNoteId,
+      );
+      if (attachment == null || !mounted) return;
+      setState(() => _pendingAttachments.add(attachment));
+    } on AttachmentException catch (error) {
+      if (!mounted) return;
+      _showValidationMessage(error.message);
+    } catch (error) {
+      debugPrint('No se pudo abrir la cámara. Error exacto: $error');
+      if (!mounted) return;
+      _showValidationMessage('No se pudo abrir la cámara.');
+    }
+  }
+
+  Future<void> _pickImageFromGallery() async {
+    if (_isSaving) return;
+    try {
+      final attachment = await _attachmentService.pickImageFromGallery(
+        mobileNoteId: _draftMobileNoteId,
+      );
+      if (attachment == null || !mounted) return;
+      setState(() => _pendingAttachments.add(attachment));
+    } on AttachmentException catch (error) {
+      if (!mounted) return;
+      _showValidationMessage(error.message);
+    } catch (error) {
+      debugPrint('No se pudo seleccionar imagen. Error exacto: $error');
+      if (!mounted) return;
+      _showValidationMessage('No se pudo seleccionar imagen.');
+    }
+  }
+
+  Future<void> _removeAttachment(MobileAttachment attachment) async {
+    await _attachmentService.removePendingAttachment(attachment);
+    if (!mounted) return;
+    setState(() => _pendingAttachments.remove(attachment));
   }
 
   void _showValidationMessage(String message) {
@@ -109,8 +160,8 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       _showValidationMessage('El tipo es obligatorio.');
       return;
     }
-    if (content.isEmpty) {
-      _showValidationMessage('El contenido es obligatorio.');
+    if (content.isEmpty && _pendingAttachments.isEmpty) {
+      _showValidationMessage('Escribe contenido o añade al menos un adjunto.');
       return;
     }
 
@@ -124,7 +175,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
 
     final now = DateTime.now();
     final note = MobileNote(
-      mobileNoteId: _uuid.v4(),
+      mobileNoteId: _draftMobileNoteId,
       title: title,
       areaId: area.id,
       area: area.name,
@@ -137,14 +188,21 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       source: 'mobile',
       createdAt: now,
       updatedAt: now,
-      syncStatus: SyncStatus.uploaded,
+      syncStatus: _pendingAttachments.isEmpty ? SyncStatus.uploaded : SyncStatus.pending,
       userId: uid,
       deviceId: await _firebaseSyncService.readDeviceId(),
-      attachmentsCount: 0,
+      attachmentsCount: _pendingAttachments.length,
     );
 
     try {
-      await _firebaseSyncService.createTextNote(note);
+      if (_pendingAttachments.isEmpty) {
+        await _firebaseSyncService.createTextNote(note);
+      } else {
+        await _firebaseSyncService.createNoteWithAttachments(
+          note: note,
+          attachments: List<MobileAttachment>.unmodifiable(_pendingAttachments),
+        );
+      }
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Nota guardada para sincronización')),
@@ -273,12 +331,12 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
                           AttachmentActionButton(
                             icon: Icons.photo_camera_outlined,
                             label: 'Cámara',
-                            onPressed: _showPendingAttachmentMessage,
+                            onPressed: _isSaving ? null : _pickImageFromCamera,
                           ),
                           AttachmentActionButton(
                             icon: Icons.photo_library_outlined,
                             label: 'Galería',
-                            onPressed: _showPendingAttachmentMessage,
+                            onPressed: _isSaving ? null : _pickImageFromGallery,
                           ),
                           AttachmentActionButton(
                             icon: Icons.mic_none_outlined,
@@ -291,6 +349,11 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
                             onPressed: _showPendingAttachmentMessage,
                           ),
                         ],
+                      ),
+                      const SizedBox(height: 16),
+                      _AttachmentsPreview(
+                        attachments: _pendingAttachments,
+                        onRemove: _isSaving ? null : _removeAttachment,
                       ),
                       const SizedBox(height: 32),
                       FilledButton.icon(
@@ -318,6 +381,68 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
         ),
       ),
     );
+  }
+}
+
+
+class _AttachmentsPreview extends StatelessWidget {
+  const _AttachmentsPreview({
+    required this.attachments,
+    required this.onRemove,
+  });
+
+  final List<MobileAttachment> attachments;
+  final ValueChanged<MobileAttachment>? onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    if (attachments.isEmpty) {
+      return Text(
+        'Sin adjuntos seleccionados.',
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: AppColors.textSecondary,
+            ),
+      );
+    }
+
+    return Column(
+      children: attachments
+          .map(
+            (attachment) => Card(
+              child: ListTile(
+                leading: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.file(
+                    File(attachment.localPath),
+                    width: 48,
+                    height: 48,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const Icon(Icons.image_outlined),
+                  ),
+                ),
+                title: Text(
+                  attachment.filename,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(_formatBytes(attachment.size)),
+                trailing: IconButton(
+                  tooltip: 'Eliminar adjunto',
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: onRemove == null ? null : () => onRemove!(attachment),
+                ),
+              ),
+            ),
+          )
+          .toList(growable: false),
+    );
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    final kb = bytes / 1024;
+    if (kb < 1024) return '${kb.toStringAsFixed(1)} KB';
+    return '${(kb / 1024).toStringAsFixed(1)} MB';
   }
 }
 

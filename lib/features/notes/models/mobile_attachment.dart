@@ -1,3 +1,5 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
 import 'sync_status.dart';
 
 class MobileAttachment {
@@ -32,33 +34,33 @@ class MobileAttachment {
 
   Map<String, dynamic> toMap() {
     return {
-      'mobileAttachmentId': mobileAttachmentId,
-      'mobileNoteId': mobileNoteId,
+      'mobile_attachment_id': mobileAttachmentId,
+      'mobile_note_id': mobileNoteId,
       'filename': filename,
-      'mimeType': mimeType,
-      'localPath': localPath,
-      'storagePath': storagePath,
+      'mime_type': mimeType,
+      'local_path': localPath,
+      'storage_path': storagePath,
       'size': size,
-      'createdAt': createdAt.toIso8601String(),
-      'syncStatus': syncStatus.value,
-      'importedAt': importedAt?.toIso8601String(),
-      'errorMessage': errorMessage,
+      'created_at': createdAt.toIso8601String(),
+      'sync_status': syncStatus.value,
+      'imported_at': importedAt?.toIso8601String(),
+      'error_message': errorMessage,
     };
   }
 
   factory MobileAttachment.fromMap(Map<String, dynamic> map) {
     return MobileAttachment(
-      mobileAttachmentId: map['mobileAttachmentId'] as String? ?? '',
-      mobileNoteId: map['mobileNoteId'] as String? ?? '',
-      filename: map['filename'] as String? ?? '',
-      mimeType: map['mimeType'] as String? ?? '',
-      localPath: map['localPath'] as String? ?? '',
-      storagePath: map['storagePath'] as String?,
-      size: map['size'] as int? ?? 0,
-      createdAt: _readDateTime(map['createdAt']) ?? DateTime.now(),
-      syncStatus: SyncStatus.fromValue(map['syncStatus'] as String?),
-      importedAt: _readDateTime(map['importedAt']),
-      errorMessage: map['errorMessage'] as String?,
+      mobileAttachmentId: _readString(map, 'mobile_attachment_id', 'mobileAttachmentId'),
+      mobileNoteId: _readString(map, 'mobile_note_id', 'mobileNoteId'),
+      filename: _readString(map, 'filename'),
+      mimeType: _readString(map, 'mime_type', 'mimeType'),
+      localPath: _readString(map, 'local_path', 'localPath'),
+      storagePath: _readNullableString(map['storage_path']) ?? _readNullableString(map['storagePath']),
+      size: _readInt(map['size']),
+      createdAt: _readDateTime(map['created_at'] ?? map['createdAt']) ?? DateTime.now(),
+      syncStatus: SyncStatus.fromValue(_readNullableString(map['sync_status']) ?? _readNullableString(map['syncStatus'])),
+      importedAt: _readDateTime(map['imported_at'] ?? map['importedAt']),
+      errorMessage: _readNullableString(map['error_message']) ?? _readNullableString(map['errorMessage']),
     );
   }
 
@@ -90,8 +92,13 @@ class MobileAttachment {
     );
   }
 
+  static String _readString(Map<String, dynamic> map, String key, [String? fallbackKey]) =>
+      _readNullableString(map[key]) ?? (fallbackKey == null ? null : _readNullableString(map[fallbackKey])) ?? '';
+  static String? _readNullableString(Object? value) => value is String ? value : null;
+  static int _readInt(dynamic value) => value is int ? value : (value is num ? value.toInt() : 0);
   static DateTime? _readDateTime(dynamic value) {
     if (value == null) return null;
+    if (value is Timestamp) return value.toDate();
     if (value is DateTime) return value;
     if (value is String) return DateTime.tryParse(value);
     return null;
