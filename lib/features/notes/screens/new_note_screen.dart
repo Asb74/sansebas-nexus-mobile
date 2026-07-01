@@ -5,9 +5,9 @@ class NewNoteScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(
-      appBar: AppBar(title: Text('Nueva nota')),
-      body: Center(child: Text('Pantalla provisional para crear una nueva nota.')),
+    return Scaffold(
+      appBar: AppBar(title: const Text('Nueva nota')),
+      body: const Center(child: Text('Pantalla provisional para crear una nueva nota.')),
     );
   }
 }
