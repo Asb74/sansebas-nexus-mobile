@@ -15,6 +15,14 @@ class MobileAttachment {
     required this.syncStatus,
     this.importedAt,
     this.errorMessage,
+    this.captureMode = 'camera',
+    this.optimizedForOcr = false,
+    this.originalFilename,
+    this.originalSize,
+    this.processedSize,
+    this.imageFormat,
+    this.width,
+    this.height,
   });
 
   final String mobileAttachmentId;
@@ -28,6 +36,14 @@ class MobileAttachment {
   final SyncStatus syncStatus;
   final DateTime? importedAt;
   final String? errorMessage;
+  final String captureMode;
+  final bool optimizedForOcr;
+  final String? originalFilename;
+  final int? originalSize;
+  final int? processedSize;
+  final String? imageFormat;
+  final int? width;
+  final int? height;
 
   bool get isImage => mimeType.startsWith('image/');
   bool get isUploaded => syncStatus == SyncStatus.uploaded || syncStatus == SyncStatus.imported;
@@ -45,6 +61,14 @@ class MobileAttachment {
       'sync_status': syncStatus.value,
       'imported_at': importedAt?.toIso8601String(),
       'error_message': errorMessage,
+      'capture_mode': captureMode,
+      'optimized_for_ocr': optimizedForOcr,
+      'original_filename': originalFilename,
+      'original_size': originalSize,
+      'processed_size': processedSize,
+      'image_format': imageFormat,
+      'width': width,
+      'height': height,
     };
   }
 
@@ -61,6 +85,14 @@ class MobileAttachment {
       syncStatus: SyncStatus.fromValue(_readNullableString(map['sync_status']) ?? _readNullableString(map['syncStatus'])),
       importedAt: _readDateTime(map['imported_at'] ?? map['importedAt']),
       errorMessage: _readNullableString(map['error_message']) ?? _readNullableString(map['errorMessage']),
+      captureMode: _readNullableString(map['capture_mode']) ?? _readNullableString(map['captureMode']) ?? 'camera',
+      optimizedForOcr: _readBool(map['optimized_for_ocr'] ?? map['optimizedForOcr']),
+      originalFilename: _readNullableString(map['original_filename']) ?? _readNullableString(map['originalFilename']),
+      originalSize: _readNullableInt(map['original_size'] ?? map['originalSize']),
+      processedSize: _readNullableInt(map['processed_size'] ?? map['processedSize']),
+      imageFormat: _readNullableString(map['image_format']) ?? _readNullableString(map['imageFormat']),
+      width: _readNullableInt(map['width']),
+      height: _readNullableInt(map['height']),
     );
   }
 
@@ -76,6 +108,14 @@ class MobileAttachment {
     SyncStatus? syncStatus,
     DateTime? importedAt,
     String? errorMessage,
+    String? captureMode,
+    bool? optimizedForOcr,
+    String? originalFilename,
+    int? originalSize,
+    int? processedSize,
+    String? imageFormat,
+    int? width,
+    int? height,
   }) {
     return MobileAttachment(
       mobileAttachmentId: mobileAttachmentId ?? this.mobileAttachmentId,
@@ -89,6 +129,14 @@ class MobileAttachment {
       syncStatus: syncStatus ?? this.syncStatus,
       importedAt: importedAt ?? this.importedAt,
       errorMessage: errorMessage ?? this.errorMessage,
+      captureMode: captureMode ?? this.captureMode,
+      optimizedForOcr: optimizedForOcr ?? this.optimizedForOcr,
+      originalFilename: originalFilename ?? this.originalFilename,
+      originalSize: originalSize ?? this.originalSize,
+      processedSize: processedSize ?? this.processedSize,
+      imageFormat: imageFormat ?? this.imageFormat,
+      width: width ?? this.width,
+      height: height ?? this.height,
     );
   }
 
@@ -96,6 +144,8 @@ class MobileAttachment {
       _readNullableString(map[key]) ?? (fallbackKey == null ? null : _readNullableString(map[fallbackKey])) ?? '';
   static String? _readNullableString(Object? value) => value is String ? value : null;
   static int _readInt(dynamic value) => value is int ? value : (value is num ? value.toInt() : 0);
+  static int? _readNullableInt(dynamic value) => value is int ? value : (value is num ? value.toInt() : null);
+  static bool _readBool(dynamic value) => value is bool ? value : false;
   static DateTime? _readDateTime(dynamic value) {
     if (value == null) return null;
     if (value is Timestamp) return value.toDate();

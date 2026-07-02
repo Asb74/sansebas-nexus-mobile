@@ -18,7 +18,7 @@ class AttachmentService {
     try {
       final file = await _imagePicker.pickImage(source: ImageSource.camera, imageQuality: 85);
       if (file == null) return null;
-      return buildMobileAttachmentFromFile(file: file, mobileNoteId: mobileNoteId);
+      return buildMobileAttachmentFromFile(file: file, mobileNoteId: mobileNoteId, captureMode: 'camera');
     } catch (error) {
       debugPrint('No se pudo abrir la cámara. Error exacto: $error');
       throw AttachmentException('No se pudo abrir la cámara.');
@@ -29,7 +29,7 @@ class AttachmentService {
     try {
       final file = await _imagePicker.pickImage(source: ImageSource.gallery, imageQuality: 85);
       if (file == null) return null;
-      return buildMobileAttachmentFromFile(file: file, mobileNoteId: mobileNoteId);
+      return buildMobileAttachmentFromFile(file: file, mobileNoteId: mobileNoteId, captureMode: 'gallery');
     } catch (error) {
       debugPrint('No se pudo seleccionar imagen. Error exacto: $error');
       throw AttachmentException('No se pudo seleccionar imagen.');
@@ -43,6 +43,7 @@ class AttachmentService {
   Future<MobileAttachment> buildMobileAttachmentFromFile({
     required XFile file,
     required String mobileNoteId,
+    required String captureMode,
   }) async {
     final filename = p.basename(file.path).trim().isEmpty ? file.name : p.basename(file.path);
     final mimeType = file.mimeType ?? _guessImageMimeType(filename);
@@ -56,6 +57,12 @@ class AttachmentService {
       size: size,
       createdAt: DateTime.now(),
       syncStatus: SyncStatus.pending,
+      captureMode: captureMode,
+      optimizedForOcr: false,
+      originalFilename: filename,
+      originalSize: size,
+      processedSize: size,
+      imageFormat: p.extension(filename).replaceFirst('.', '').toLowerCase(),
     );
   }
 
