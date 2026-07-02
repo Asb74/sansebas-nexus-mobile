@@ -62,7 +62,6 @@ class FirebaseSyncService {
       userId: uid,
       syncStatus: SyncStatus.uploaded,
       attachmentsCount: 0,
-      source: 'mobile',
     );
     final docRef = _firestore.collection(notesCollection).doc(noteToSave.mobileNoteId);
 
@@ -108,7 +107,6 @@ class FirebaseSyncService {
       userId: uid,
       syncStatus: SyncStatus.uploading,
       attachmentsCount: 0,
-      source: 'mobile',
       updatedAt: now,
       errorMessage: null,
     );
