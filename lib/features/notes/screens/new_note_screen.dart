@@ -111,9 +111,9 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       if (attachment == null || !mounted) return;
       setState(() => _pendingAttachments.add(attachment));
       _showValidationMessage(
-        attachment.optimizedForOcr
-            ? 'Imagen optimizada para OCR.'
-            : 'No se pudo procesar la imagen. Se usará la imagen original.',
+        attachment.errorMessage != null && attachment.errorMessage!.isNotEmpty
+            ? '${attachment.errorMessage} Documento escaneado añadido como PDF.'
+            : 'Documento escaneado añadido como PDF.',
       );
     } on DocumentScanException catch (error) {
       if (!mounted) return;
@@ -365,7 +365,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
                           ),
                           AttachmentActionButton(
                             icon: Icons.document_scanner_outlined,
-                            label: 'Escanear documento',
+                            label: 'Escanear PDF',
                             onPressed: _isSaving ? null : _scanDocument,
                           ),
                           AttachmentActionButton(
@@ -440,16 +440,7 @@ class _AttachmentsPreview extends StatelessWidget {
           .map(
             (attachment) => Card(
               child: ListTile(
-                leading: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.file(
-                    File(attachment.localPath),
-                    width: 48,
-                    height: 48,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const Icon(Icons.image_outlined),
-                  ),
-                ),
+                leading: _AttachmentLeading(attachment: attachment),
                 title: Text(
                   attachment.filename,
                   maxLines: 1,
@@ -458,10 +449,10 @@ class _AttachmentsPreview extends StatelessWidget {
                 subtitle: Text(
                   [
                     _formatBytes(attachment.size),
-                    _captureModeLabel(attachment.captureMode),
-                    if (attachment.optimizedForOcr) 'Optimizado para OCR',
-                    if (attachment.imageFormat != null && attachment.imageFormat!.isNotEmpty)
-                      attachment.imageFormat!.toUpperCase(),
+                    _attachmentTypeLabel(attachment),
+                    'Origen: ${_captureModeLabel(attachment.captureMode)}',
+                    if (attachment.optimizedForOcr) 'Optimizado OCR: Sí',
+                    if (attachment.pageCount != null) '${attachment.pageCount} pág.',
                   ].join(' · '),
                 ),
                 trailing: IconButton(
@@ -483,10 +474,18 @@ class _AttachmentsPreview extends StatelessWidget {
     return '${(kb / 1024).toStringAsFixed(1)} MB';
   }
 
+  String _attachmentTypeLabel(MobileAttachment attachment) {
+    if (attachment.captureMode == 'document_scan' && attachment.documentFormat == 'pdf') {
+      return 'PDF escaneado';
+    }
+    if (attachment.mimeType.startsWith('image/')) return 'Imagen';
+    return attachment.mimeType;
+  }
+
   String _captureModeLabel(String captureMode) {
     return switch (captureMode) {
       'gallery' => 'Galería',
-      'document_scan' => 'Escaneo documento',
+      'document_scan' => 'Escáner',
       _ => 'Cámara',
     };
   }
@@ -522,6 +521,38 @@ class _MasterDropdown<T> extends StatelessWidget {
       onChanged: items.isEmpty ? null : onChanged,
       decoration: InputDecoration(labelText: label),
       validator: (item) => item == null ? 'Selecciona $label.' : null,
+    );
+  }
+}
+
+class _AttachmentLeading extends StatelessWidget {
+  const _AttachmentLeading({required this.attachment});
+
+  final MobileAttachment attachment;
+
+  @override
+  Widget build(BuildContext context) {
+    if (attachment.mimeType == 'application/pdf') {
+      return Container(
+        width: 48,
+        height: 48,
+        decoration: BoxDecoration(
+          color: AppColors.primary.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: const Icon(Icons.picture_as_pdf_outlined),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Image.file(
+        File(attachment.localPath),
+        width: 48,
+        height: 48,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => const Icon(Icons.image_outlined),
+      ),
     );
   }
 }
