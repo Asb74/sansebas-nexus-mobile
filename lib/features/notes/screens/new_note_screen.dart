@@ -110,10 +110,11 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       );
       if (attachment == null || !mounted) return;
       setState(() => _pendingAttachments.add(attachment));
+      final attachmentLabel = attachment.scanMode == 'fallback_photo_pdf' ? 'PDF imagen' : 'PDF escaneado';
       _showValidationMessage(
         attachment.errorMessage != null && attachment.errorMessage!.isNotEmpty
-            ? '${attachment.errorMessage} Documento escaneado añadido como PDF.'
-            : 'Documento escaneado añadido como PDF.',
+            ? '${attachment.errorMessage} $attachmentLabel añadido.'
+            : '$attachmentLabel añadido.',
       );
     } on DocumentScanException catch (error) {
       if (!mounted) return;
@@ -476,6 +477,7 @@ class _AttachmentsPreview extends StatelessWidget {
 
   String _attachmentTypeLabel(MobileAttachment attachment) {
     if (attachment.captureMode == 'document_scan' && attachment.documentFormat == 'pdf') {
+      if (attachment.scanMode == 'fallback_photo_pdf') return 'PDF imagen';
       return 'PDF escaneado';
     }
     if (attachment.mimeType.startsWith('image/')) return 'Imagen';

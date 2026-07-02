@@ -49,24 +49,36 @@ class DocumentScanService {
   Future<MobileAttachment?> _scanWithMlKit({required String mobileNoteId}) async {
     final options = DocumentScannerOptions(
       documentFormats: const {DocumentFormat.jpeg, DocumentFormat.pdf},
-      mode: ScannerMode.filter,
+      mode: ScannerMode.full,
       pageLimit: 1,
       isGalleryImport: false,
     );
     final scanner = DocumentScanner(options: options);
     try {
       final result = await scanner.scanDocument();
-      final pdfPath = result.pdf?.uri;
+      final scannerPdf = result.pdf;
+      final pdfPath = scannerPdf?.uri;
       final imagePaths = result.images;
-      if (imagePaths == null || imagePaths.isEmpty) return null;
-      final firstImagePath = imagePaths.first;
 
       if (pdfPath == null || pdfPath.isEmpty) {
+        if (imagePaths == null || imagePaths.isEmpty) return null;
+        // TODO: google_mlkit_document_scanner 0.4.1 does not expose explicit
+        // crop/perspective metadata nor a programmatic manual-border editor.
+        // ScannerMode.full opens ML Kit's native UI, where users can crop/edit,
+        // but if only an image comes back we cannot prove perspective correction
+        // from Dart. Consider a dedicated SDK such as Scanbot SDK or Dynamsoft
+        // Document Normalizer if verifiable crop geometry is required.
         return _buildPdfAttachmentFromImage(
-          imagePath: firstImagePath,
+          imagePath: imagePaths.first,
           mobileNoteId: mobileNoteId,
-          originalFilename: p.basename(firstImagePath),
-          detectedAutomatically: true,
+          originalFilename: p.basename(imagePaths.first),
+          scannerEngine: 'google_mlkit_document_scanner',
+          hasPerspectiveCorrection: false,
+          hasManualCrop: false,
+          generatedPdfByScanner: false,
+          optimizedForOcr: false,
+          scanMode: 'fallback_photo_pdf',
+          fallbackMessage: 'No se pudo realizar escaneo avanzado. Se guardó como PDF de imagen.',
         );
       }
 
@@ -76,9 +88,9 @@ class DocumentScanService {
         attachmentId: attachmentId,
       );
       final pdfSize = await pdfFile.length();
-      final firstImage = File(firstImagePath);
-      final dimensions = img.decodeImage(await firstImage.readAsBytes());
-      final originalSize = await firstImage.length();
+      final firstImagePath = imagePaths?.isNotEmpty == true ? imagePaths!.first : null;
+      final dimensions = firstImagePath == null ? null : img.decodeImage(await File(firstImagePath).readAsBytes());
+      final originalSize = firstImagePath == null ? null : await File(firstImagePath).length();
 
       return MobileAttachment(
         mobileAttachmentId: attachmentId,
@@ -92,12 +104,16 @@ class DocumentScanService {
         captureMode: 'document_scan',
         optimizedForOcr: true,
         documentFormat: 'pdf',
-        originalFilename: p.basename(firstImage.path),
+        originalFilename: firstImagePath == null ? p.basename(pdfFile.path) : p.basename(firstImagePath),
         originalSize: originalSize,
         processedSize: pdfSize,
-        imageFormat: _extensionWithoutDot(firstImage.path),
-        pageCount: 1,
-        scanMode: 'document',
+        imageFormat: firstImagePath == null ? null : _extensionWithoutDot(firstImagePath),
+        pageCount: scannerPdf?.pageCount ?? 1,
+        scanMode: 'mlkit_document_scanner',
+        scannerEngine: 'google_mlkit_document_scanner',
+        hasPerspectiveCorrection: true,
+        hasManualCrop: true,
+        generatedPdfByScanner: true,
         width: dimensions?.width,
         height: dimensions?.height,
       );
@@ -121,8 +137,13 @@ class DocumentScanService {
         imagePath: capture.path,
         mobileNoteId: mobileNoteId,
         originalFilename: _filenameFor(capture),
-        fallbackMessage: 'No se detectó el documento automáticamente. Se usará la imagen original.',
-        detectedAutomatically: false,
+        scannerEngine: 'image_picker_camera',
+        hasPerspectiveCorrection: false,
+        hasManualCrop: false,
+        generatedPdfByScanner: false,
+        optimizedForOcr: false,
+        scanMode: 'fallback_photo_pdf',
+        fallbackMessage: 'No se pudo realizar escaneo avanzado. Se guardó como PDF de imagen.',
       );
     } catch (error) {
       debugPrint('No se pudo generar el PDF. Error exacto: $error');
@@ -134,7 +155,12 @@ class DocumentScanService {
     required String imagePath,
     required String mobileNoteId,
     required String originalFilename,
-    required bool detectedAutomatically,
+    required String scannerEngine,
+    required bool hasPerspectiveCorrection,
+    required bool hasManualCrop,
+    required bool generatedPdfByScanner,
+    required bool optimizedForOcr,
+    required String scanMode,
     String? fallbackMessage,
   }) async {
     final originalFile = File(imagePath);
@@ -165,14 +191,18 @@ class DocumentScanService {
       syncStatus: SyncStatus.pending,
       errorMessage: fallbackMessage,
       captureMode: 'document_scan',
-      optimizedForOcr: true,
+      optimizedForOcr: optimizedForOcr,
       documentFormat: 'pdf',
       originalFilename: originalFilename,
       originalSize: originalBytes.length,
       processedSize: pdfSize,
       imageFormat: _extensionWithoutDot(originalFilename),
       pageCount: 1,
-      scanMode: detectedAutomatically ? 'document' : 'document_fallback',
+      scanMode: scanMode,
+      scannerEngine: scannerEngine,
+      hasPerspectiveCorrection: hasPerspectiveCorrection,
+      hasManualCrop: hasManualCrop,
+      generatedPdfByScanner: generatedPdfByScanner,
       width: processed.width,
       height: processed.height,
     );
