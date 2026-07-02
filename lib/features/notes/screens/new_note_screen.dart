@@ -1,6 +1,8 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/theme/app_colors.dart';
@@ -33,12 +35,15 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   final _attachmentService = AttachmentService();
   final _documentScanService = DocumentScanService();
   final _uuid = const Uuid();
+  final _audioRecorder = AudioRecorder();
 
   late final Future<MasterData> _mastersFuture;
   AreaMaster? _selectedArea;
   TopicMaster? _selectedTopic;
   NoteTypeMaster? _selectedType;
   bool _isSaving = false;
+  bool _isRecordingAudio = false;
+  DateTime? _audioStartedAt;
   late String _draftMobileNoteId;
   final List<MobileAttachment> _pendingAttachments = <MobileAttachment>[];
 
@@ -53,18 +58,88 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   void dispose() {
     _titleController.dispose();
     _tagsController.dispose();
+    _audioRecorder.dispose();
     _contentController.dispose();
     super.dispose();
   }
 
-  void _showPendingAttachmentMessage() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Función pendiente de implementar en una fase posterior'),
-      ),
-    );
+
+  Future<void> _pickFile() async {
+    if (_isSaving) return;
+    try {
+      final attachment = await _attachmentService.pickFile(mobileNoteId: _draftMobileNoteId);
+      if (attachment == null || !mounted) return;
+      setState(() => _pendingAttachments.add(attachment));
+    } on AttachmentException catch (error) {
+      if (!mounted) return;
+      _showValidationMessage(error.message);
+    } catch (error) {
+      debugPrint('No se pudo seleccionar archivo. Error exacto: $error');
+      if (!mounted) return;
+      _showValidationMessage('No se pudo seleccionar el archivo.');
+    }
   }
 
+  Future<void> _toggleAudioRecording() async {
+    if (_isSaving) return;
+    if (_isRecordingAudio) {
+      await _stopAudioRecording();
+      return;
+    }
+
+    try {
+      if (!await _audioRecorder.hasPermission()) {
+        _showValidationMessage('Permiso de micrófono denegado.');
+        return;
+      }
+      final directory = await getTemporaryDirectory();
+      final path = '${directory.path}/${_uuid.v4()}.m4a';
+      await _audioRecorder.start(
+        const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 128000, sampleRate: 44100),
+        path: path,
+      );
+      if (!mounted) return;
+      setState(() {
+        _isRecordingAudio = true;
+        _audioStartedAt = DateTime.now();
+      });
+    } catch (error) {
+      debugPrint('No se pudo iniciar la grabación. Error exacto: $error');
+      if (!mounted) return;
+      _showValidationMessage('No se pudo iniciar la grabación de audio.');
+    }
+  }
+
+  Future<void> _stopAudioRecording() async {
+    try {
+      final startedAt = _audioStartedAt;
+      final path = await _audioRecorder.stop();
+      if (!mounted) return;
+      setState(() {
+        _isRecordingAudio = false;
+        _audioStartedAt = null;
+      });
+      if (path == null) return;
+      final durationSeconds = startedAt == null ? null : DateTime.now().difference(startedAt).inSeconds;
+      final attachment = await _attachmentService.buildMobileAttachmentFromPath(
+        path: path,
+        mobileNoteId: _draftMobileNoteId,
+        captureMode: 'audio',
+        filename: 'audio_${DateTime.now().millisecondsSinceEpoch}.m4a',
+        mimeType: 'audio/mp4',
+        durationSeconds: durationSeconds,
+      );
+      if (!mounted) return;
+      setState(() => _pendingAttachments.add(attachment));
+    } on AttachmentException catch (error) {
+      if (!mounted) return;
+      _showValidationMessage(error.message);
+    } catch (error) {
+      debugPrint('No se pudo detener la grabación. Error exacto: $error');
+      if (!mounted) return;
+      _showValidationMessage('No se pudo adjuntar el audio.');
+    }
+  }
 
   Future<void> _pickImageFromCamera() async {
     if (_isSaving) return;
@@ -371,13 +446,13 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
                           ),
                           AttachmentActionButton(
                             icon: Icons.mic_none_outlined,
-                            label: 'Audio',
-                            onPressed: _showPendingAttachmentMessage,
+                            label: _isRecordingAudio ? 'Parar audio' : 'Audio',
+                            onPressed: _isSaving ? null : _toggleAudioRecording,
                           ),
                           AttachmentActionButton(
                             icon: Icons.attach_file_outlined,
                             label: 'Archivo',
-                            onPressed: _showPendingAttachmentMessage,
+                            onPressed: _isSaving ? null : _pickFile,
                           ),
                         ],
                       ),
@@ -454,6 +529,7 @@ class _AttachmentsPreview extends StatelessWidget {
                     'Origen: ${_captureModeLabel(attachment.captureMode)}',
                     if (attachment.optimizedForOcr) 'Optimizado OCR: Sí',
                     if (attachment.pageCount != null) '${attachment.pageCount} pág.',
+                    if (attachment.durationSeconds != null) '${attachment.durationSeconds}s',
                   ].join(' · '),
                 ),
                 trailing: IconButton(
@@ -488,6 +564,9 @@ class _AttachmentsPreview extends StatelessWidget {
     return switch (captureMode) {
       'gallery' => 'Galería',
       'document_scan' => 'Escáner',
+      'audio' => 'Audio',
+      'file_picker' => 'Archivo',
+      'android_share' => 'Compartir',
       _ => 'Cámara',
     };
   }
@@ -534,6 +613,9 @@ class _AttachmentLeading extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (attachment.mimeType.startsWith('audio/')) {
+      return const Icon(Icons.audio_file_outlined, size: 40);
+    }
     if (attachment.mimeType == 'application/pdf') {
       return Container(
         width: 48,
@@ -544,6 +626,10 @@ class _AttachmentLeading extends StatelessWidget {
         ),
         child: const Icon(Icons.picture_as_pdf_outlined),
       );
+    }
+
+    if (!attachment.mimeType.startsWith('image/')) {
+      return const Icon(Icons.insert_drive_file_outlined, size: 40);
     }
 
     return ClipRRect(

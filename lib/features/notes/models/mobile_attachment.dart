@@ -30,6 +30,9 @@ class MobileAttachment {
     this.generatedPdfByScanner,
     this.width,
     this.height,
+    this.durationSeconds,
+    this.source = 'mobile',
+    this.isSharedFile = false,
   });
 
   final String mobileAttachmentId;
@@ -58,6 +61,9 @@ class MobileAttachment {
   final bool? generatedPdfByScanner;
   final int? width;
   final int? height;
+  final int? durationSeconds;
+  final String source;
+  final bool isSharedFile;
 
   bool get isImage => mimeType.startsWith('image/');
   bool get isUploaded => syncStatus == SyncStatus.uploaded || syncStatus == SyncStatus.imported;
@@ -90,6 +96,9 @@ class MobileAttachment {
       'generated_pdf_by_scanner': generatedPdfByScanner,
       'width': width,
       'height': height,
+      'duration_seconds': durationSeconds,
+      'source': source,
+      'is_shared_file': isSharedFile,
     };
   }
 
@@ -121,6 +130,9 @@ class MobileAttachment {
       generatedPdfByScanner: _readNullableBool(map['generated_pdf_by_scanner'] ?? map['generatedPdfByScanner']),
       width: _readNullableInt(map['width']),
       height: _readNullableInt(map['height']),
+      durationSeconds: _readNullableInt(map['duration_seconds'] ?? map['durationSeconds']),
+      source: _readNullableString(map['source']) ?? 'mobile',
+      isSharedFile: _readBool(map['is_shared_file'] ?? map['isSharedFile']),
     );
   }
 
@@ -151,6 +163,9 @@ class MobileAttachment {
     bool? generatedPdfByScanner,
     int? width,
     int? height,
+    int? durationSeconds,
+    String? source,
+    bool? isSharedFile,
     bool clearErrorMessage = false,
   }) {
     return MobileAttachment(
@@ -180,6 +195,9 @@ class MobileAttachment {
       generatedPdfByScanner: generatedPdfByScanner ?? this.generatedPdfByScanner,
       width: width ?? this.width,
       height: height ?? this.height,
+      durationSeconds: durationSeconds ?? this.durationSeconds,
+      source: source ?? this.source,
+      isSharedFile: isSharedFile ?? this.isSharedFile,
     );
   }
 
