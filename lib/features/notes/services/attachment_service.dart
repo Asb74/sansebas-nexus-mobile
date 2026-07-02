@@ -44,12 +44,15 @@ class AttachmentService {
       final result = await FilePicker.platform.pickFiles(allowMultiple: false, withData: false);
       final picked = result?.files.single;
       if (picked == null || picked.path == null) return null;
+      final detectedMimeType = lookupMimeType(
+        picked.path ?? picked.name,
+      ) ?? 'application/octet-stream';
       return buildMobileAttachmentFromPath(
         path: picked.path!,
         mobileNoteId: mobileNoteId,
         captureMode: 'file_picker',
         filename: picked.name,
-        mimeType: picked.mimeType,
+        mimeType: detectedMimeType,
       );
     } on AttachmentException {
       rethrow;
