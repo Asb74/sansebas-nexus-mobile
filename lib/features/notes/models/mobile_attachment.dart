@@ -24,6 +24,10 @@ class MobileAttachment {
     this.documentFormat,
     this.pageCount,
     this.scanMode,
+    this.scannerEngine,
+    this.hasPerspectiveCorrection,
+    this.hasManualCrop,
+    this.generatedPdfByScanner,
     this.width,
     this.height,
   });
@@ -48,6 +52,10 @@ class MobileAttachment {
   final String? documentFormat;
   final int? pageCount;
   final String? scanMode;
+  final String? scannerEngine;
+  final bool? hasPerspectiveCorrection;
+  final bool? hasManualCrop;
+  final bool? generatedPdfByScanner;
   final int? width;
   final int? height;
 
@@ -76,6 +84,10 @@ class MobileAttachment {
       'document_format': documentFormat,
       'page_count': pageCount,
       'scan_mode': scanMode,
+      'scanner_engine': scannerEngine,
+      'has_perspective_correction': hasPerspectiveCorrection,
+      'has_manual_crop': hasManualCrop,
+      'generated_pdf_by_scanner': generatedPdfByScanner,
       'width': width,
       'height': height,
     };
@@ -103,6 +115,10 @@ class MobileAttachment {
       documentFormat: _readNullableString(map['document_format']) ?? _readNullableString(map['documentFormat']),
       pageCount: _readNullableInt(map['page_count'] ?? map['pageCount']),
       scanMode: _readNullableString(map['scan_mode']) ?? _readNullableString(map['scanMode']),
+      scannerEngine: _readNullableString(map['scanner_engine']) ?? _readNullableString(map['scannerEngine']),
+      hasPerspectiveCorrection: _readNullableBool(map['has_perspective_correction'] ?? map['hasPerspectiveCorrection']),
+      hasManualCrop: _readNullableBool(map['has_manual_crop'] ?? map['hasManualCrop']),
+      generatedPdfByScanner: _readNullableBool(map['generated_pdf_by_scanner'] ?? map['generatedPdfByScanner']),
       width: _readNullableInt(map['width']),
       height: _readNullableInt(map['height']),
     );
@@ -129,6 +145,10 @@ class MobileAttachment {
     String? documentFormat,
     int? pageCount,
     String? scanMode,
+    String? scannerEngine,
+    bool? hasPerspectiveCorrection,
+    bool? hasManualCrop,
+    bool? generatedPdfByScanner,
     int? width,
     int? height,
     bool clearErrorMessage = false,
@@ -154,6 +174,10 @@ class MobileAttachment {
       documentFormat: documentFormat ?? this.documentFormat,
       pageCount: pageCount ?? this.pageCount,
       scanMode: scanMode ?? this.scanMode,
+      scannerEngine: scannerEngine ?? this.scannerEngine,
+      hasPerspectiveCorrection: hasPerspectiveCorrection ?? this.hasPerspectiveCorrection,
+      hasManualCrop: hasManualCrop ?? this.hasManualCrop,
+      generatedPdfByScanner: generatedPdfByScanner ?? this.generatedPdfByScanner,
       width: width ?? this.width,
       height: height ?? this.height,
     );
@@ -165,6 +189,7 @@ class MobileAttachment {
   static int _readInt(dynamic value) => value is int ? value : (value is num ? value.toInt() : 0);
   static int? _readNullableInt(dynamic value) => value is int ? value : (value is num ? value.toInt() : null);
   static bool _readBool(dynamic value) => value is bool ? value : false;
+  static bool? _readNullableBool(dynamic value) => value is bool ? value : null;
   static DateTime? _readDateTime(dynamic value) {
     if (value == null) return null;
     if (value is Timestamp) return value.toDate();
