@@ -68,6 +68,13 @@ class HomeScreen extends StatelessWidget {
                     label: const Text('Nueva nota'),
                   ),
                   const SizedBox(height: 16),
+                  FilledButton.tonalIcon(
+                    onPressed: () =>
+                        Navigator.pushNamed(context, AppRoutes.voiceNote),
+                    icon: const Icon(Icons.mic_none_outlined),
+                    label: const Text('Dictar nota'),
+                  ),
+                  const SizedBox(height: 16),
                   OutlinedButton.icon(
                     onPressed: () =>
                         Navigator.pushNamed(context, AppRoutes.notesList),

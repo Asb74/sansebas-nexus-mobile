@@ -6,6 +6,7 @@ import '../features/notes/screens/new_note_screen.dart';
 import '../features/notes/screens/note_detail_screen.dart';
 import '../features/notes/screens/notes_list_screen.dart';
 import '../features/settings/settings_screen.dart';
+import '../features/voice/screens/voice_note_screen.dart';
 import '../features/splash/splash_screen.dart';
 
 class AppRoutes {
@@ -16,6 +17,7 @@ class AppRoutes {
   static const home = '/';
   static const newNote = '/notes/new';
   static const notesList = '/notes';
+  static const voiceNote = '/notes/voice';
   static const noteDetail = '/notes/detail';
   static const settings = '/settings';
 
@@ -28,6 +30,7 @@ class AppRoutes {
         home: (_) => const HomeScreen(),
         newNote: (_) => const NewNoteScreen(),
         notesList: (_) => const NotesListScreen(),
+        voiceNote: (_) => const VoiceNoteScreen(),
         noteDetail: (_) => const NoteDetailScreen(),
         settings: (_) => const SettingsScreen(),
       };
