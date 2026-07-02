@@ -12,6 +12,7 @@ import '../models/mobile_attachment.dart';
 import '../models/mobile_note.dart';
 import '../models/sync_status.dart';
 import '../services/attachment_service.dart';
+import '../services/document_scan_service.dart';
 import '../services/firebase_sync_service.dart';
 import '../widgets/attachment_action_button.dart';
 import '../widgets/note_text_field.dart';
@@ -30,6 +31,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   final _masterService = MasterService();
   final _firebaseSyncService = FirebaseSyncService();
   final _attachmentService = AttachmentService();
+  final _documentScanService = DocumentScanService();
   final _uuid = const Uuid();
 
   late final Future<MasterData> _mastersFuture;
@@ -97,6 +99,29 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       debugPrint('No se pudo seleccionar imagen. Error exacto: $error');
       if (!mounted) return;
       _showValidationMessage('No se pudo seleccionar imagen.');
+    }
+  }
+
+  Future<void> _scanDocument() async {
+    if (_isSaving) return;
+    try {
+      final attachment = await _documentScanService.scanDocument(
+        mobileNoteId: _draftMobileNoteId,
+      );
+      if (attachment == null || !mounted) return;
+      setState(() => _pendingAttachments.add(attachment));
+      _showValidationMessage(
+        attachment.optimizedForOcr
+            ? 'Imagen optimizada para OCR.'
+            : 'No se pudo procesar la imagen. Se usará la imagen original.',
+      );
+    } on DocumentScanException catch (error) {
+      if (!mounted) return;
+      _showValidationMessage(error.message);
+    } catch (error) {
+      debugPrint('No se pudo escanear el documento. Error exacto: $error');
+      if (!mounted) return;
+      _showValidationMessage('No se pudo escanear el documento.');
     }
   }
 
@@ -339,6 +364,11 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
                             onPressed: _isSaving ? null : _pickImageFromGallery,
                           ),
                           AttachmentActionButton(
+                            icon: Icons.document_scanner_outlined,
+                            label: 'Escanear documento',
+                            onPressed: _isSaving ? null : _scanDocument,
+                          ),
+                          AttachmentActionButton(
                             icon: Icons.mic_none_outlined,
                             label: 'Audio',
                             onPressed: _showPendingAttachmentMessage,
@@ -425,7 +455,15 @@ class _AttachmentsPreview extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                subtitle: Text(_formatBytes(attachment.size)),
+                subtitle: Text(
+                  [
+                    _formatBytes(attachment.size),
+                    _captureModeLabel(attachment.captureMode),
+                    if (attachment.optimizedForOcr) 'Optimizado para OCR',
+                    if (attachment.imageFormat != null && attachment.imageFormat!.isNotEmpty)
+                      attachment.imageFormat!.toUpperCase(),
+                  ].join(' · '),
+                ),
                 trailing: IconButton(
                   tooltip: 'Eliminar adjunto',
                   icon: const Icon(Icons.delete_outline),
@@ -443,6 +481,14 @@ class _AttachmentsPreview extends StatelessWidget {
     final kb = bytes / 1024;
     if (kb < 1024) return '${kb.toStringAsFixed(1)} KB';
     return '${(kb / 1024).toStringAsFixed(1)} MB';
+  }
+
+  String _captureModeLabel(String captureMode) {
+    return switch (captureMode) {
+      'gallery' => 'Galería',
+      'document_scan' => 'Escaneo documento',
+      _ => 'Cámara',
+    };
   }
 }
 
