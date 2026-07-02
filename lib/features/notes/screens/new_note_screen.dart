@@ -537,7 +537,7 @@ class _AttachmentLeading extends StatelessWidget {
         width: 48,
         height: 48,
         decoration: BoxDecoration(
-          color: AppColors.primary.withValues(alpha: 0.12),
+          color: AppColors.primaryBlue.withValues(alpha: 0.12),
           borderRadius: BorderRadius.circular(8),
         ),
         child: const Icon(Icons.picture_as_pdf_outlined),
