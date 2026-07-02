@@ -21,6 +21,9 @@ class MobileAttachment {
     this.originalSize,
     this.processedSize,
     this.imageFormat,
+    this.documentFormat,
+    this.pageCount,
+    this.scanMode,
     this.width,
     this.height,
   });
@@ -42,6 +45,9 @@ class MobileAttachment {
   final int? originalSize;
   final int? processedSize;
   final String? imageFormat;
+  final String? documentFormat;
+  final int? pageCount;
+  final String? scanMode;
   final int? width;
   final int? height;
 
@@ -67,6 +73,9 @@ class MobileAttachment {
       'original_size': originalSize,
       'processed_size': processedSize,
       'image_format': imageFormat,
+      'document_format': documentFormat,
+      'page_count': pageCount,
+      'scan_mode': scanMode,
       'width': width,
       'height': height,
     };
@@ -91,6 +100,9 @@ class MobileAttachment {
       originalSize: _readNullableInt(map['original_size'] ?? map['originalSize']),
       processedSize: _readNullableInt(map['processed_size'] ?? map['processedSize']),
       imageFormat: _readNullableString(map['image_format']) ?? _readNullableString(map['imageFormat']),
+      documentFormat: _readNullableString(map['document_format']) ?? _readNullableString(map['documentFormat']),
+      pageCount: _readNullableInt(map['page_count'] ?? map['pageCount']),
+      scanMode: _readNullableString(map['scan_mode']) ?? _readNullableString(map['scanMode']),
       width: _readNullableInt(map['width']),
       height: _readNullableInt(map['height']),
     );
@@ -114,8 +126,12 @@ class MobileAttachment {
     int? originalSize,
     int? processedSize,
     String? imageFormat,
+    String? documentFormat,
+    int? pageCount,
+    String? scanMode,
     int? width,
     int? height,
+    bool clearErrorMessage = false,
   }) {
     return MobileAttachment(
       mobileAttachmentId: mobileAttachmentId ?? this.mobileAttachmentId,
@@ -128,13 +144,16 @@ class MobileAttachment {
       createdAt: createdAt ?? this.createdAt,
       syncStatus: syncStatus ?? this.syncStatus,
       importedAt: importedAt ?? this.importedAt,
-      errorMessage: errorMessage ?? this.errorMessage,
+      errorMessage: clearErrorMessage ? null : errorMessage ?? this.errorMessage,
       captureMode: captureMode ?? this.captureMode,
       optimizedForOcr: optimizedForOcr ?? this.optimizedForOcr,
       originalFilename: originalFilename ?? this.originalFilename,
       originalSize: originalSize ?? this.originalSize,
       processedSize: processedSize ?? this.processedSize,
       imageFormat: imageFormat ?? this.imageFormat,
+      documentFormat: documentFormat ?? this.documentFormat,
+      pageCount: pageCount ?? this.pageCount,
+      scanMode: scanMode ?? this.scanMode,
       width: width ?? this.width,
       height: height ?? this.height,
     );

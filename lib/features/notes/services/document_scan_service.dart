@@ -2,9 +2,13 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:google_mlkit_document_scanner/google_mlkit_document_scanner.dart';
 import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
 import 'package:uuid/uuid.dart';
 
 import '../models/mobile_attachment.dart';
@@ -12,17 +16,11 @@ import '../models/sync_status.dart';
 
 class DocumentScanSettings {
   const DocumentScanSettings({
-    this.defaultCaptureMode = 'camera',
-    this.uploadOriginalCopy = false,
-    this.imageQuality = 90,
-    this.preferPngForDocuments = false,
+    this.imageQuality = 88,
     this.maxImageLongSide = 2500,
   });
 
-  final String defaultCaptureMode;
-  final bool uploadOriginalCopy;
   final int imageQuality;
-  final bool preferPngForDocuments;
   final int maxImageLongSide;
 }
 
@@ -38,115 +36,176 @@ class DocumentScanService {
   final Uuid _uuid = const Uuid();
 
   Future<MobileAttachment?> scanDocument({required String mobileNoteId}) async {
-    XFile? capture;
     try {
-      capture = await _imagePicker.pickImage(
-        source: ImageSource.camera,
-        imageQuality: 100,
-      );
-      if (capture == null) return null;
+      final attachment = await _scanWithMlKit(mobileNoteId: mobileNoteId);
+      if (attachment != null) return attachment;
     } catch (error) {
-      debugPrint('No se pudo escanear el documento. Error exacto: $error');
-      throw const DocumentScanException('No se pudo escanear el documento.');
+      debugPrint('No se pudo abrir el escáner avanzado. Se usará fallback. Error exacto: $error');
     }
 
+    return _scanWithImagePickerFallback(mobileNoteId: mobileNoteId);
+  }
+
+  Future<MobileAttachment?> _scanWithMlKit({required String mobileNoteId}) async {
+    final options = DocumentScannerOptions(
+      documentFormats: const {DocumentFormat.jpeg, DocumentFormat.pdf},
+      mode: ScannerMode.filter,
+      pageLimit: 1,
+      isGalleryImport: false,
+    );
+    final scanner = DocumentScanner(options: options);
     try {
-      return await _buildProcessedAttachment(
-        capture: capture,
-        mobileNoteId: mobileNoteId,
+      final result = await scanner.scanDocument();
+      final pdfPath = result.pdf?.uri;
+      final imagePaths = result.images;
+      if (pdfPath == null || pdfPath.isEmpty) {
+        if (imagePaths.isEmpty) return null;
+        return _buildPdfAttachmentFromImage(
+          imagePath: imagePaths.first,
+          mobileNoteId: mobileNoteId,
+          originalFilename: p.basename(imagePaths.first),
+          detectedAutomatically: true,
+        );
+      }
+
+      final attachmentId = _uuid.v4();
+      final pdfFile = await _copyPdfToAttachmentFile(
+        sourcePath: pdfPath,
+        attachmentId: attachmentId,
       );
-    } catch (error) {
-      debugPrint('No se pudo procesar la imagen. Se usará la imagen original. Error exacto: $error');
-      return _buildOriginalAttachment(
-        capture: capture,
+      final pdfSize = await pdfFile.length();
+      final firstImage = imagePaths.isNotEmpty ? File(imagePaths.first) : null;
+      final dimensions = firstImage == null ? null : img.decodeImage(await firstImage.readAsBytes());
+      final originalSize = firstImage == null ? pdfSize : await firstImage.length();
+
+      return MobileAttachment(
+        mobileAttachmentId: attachmentId,
         mobileNoteId: mobileNoteId,
-        errorMessage: 'No se pudo procesar la imagen. Se usará la imagen original.',
+        filename: '${attachmentId}_scan.pdf',
+        mimeType: 'application/pdf',
+        localPath: pdfFile.path,
+        size: pdfSize,
+        createdAt: DateTime.now(),
+        syncStatus: SyncStatus.pending,
+        captureMode: 'document_scan',
+        optimizedForOcr: true,
+        documentFormat: 'pdf',
+        originalFilename: firstImage == null ? p.basename(pdfPath) : p.basename(firstImage.path),
+        originalSize: originalSize,
+        processedSize: pdfSize,
+        imageFormat: firstImage == null ? null : _extensionWithoutDot(firstImage.path),
+        pageCount: 1,
+        scanMode: 'document',
+        width: dimensions?.width,
+        height: dimensions?.height,
       );
+    } finally {
+      scanner.close();
     }
   }
 
-  Future<MobileAttachment> _buildProcessedAttachment({
-    required XFile capture,
+  Future<MobileAttachment?> _scanWithImagePickerFallback({required String mobileNoteId}) async {
+    XFile? capture;
+    try {
+      capture = await _imagePicker.pickImage(source: ImageSource.camera, imageQuality: 100);
+      if (capture == null) return null;
+    } catch (error) {
+      debugPrint('No se pudo abrir el escáner. Error exacto: $error');
+      throw const DocumentScanException('No se pudo abrir el escáner.');
+    }
+
+    try {
+      return _buildPdfAttachmentFromImage(
+        imagePath: capture.path,
+        mobileNoteId: mobileNoteId,
+        originalFilename: _filenameFor(capture),
+        fallbackMessage: 'No se detectó el documento automáticamente. Se usará la imagen original.',
+        detectedAutomatically: false,
+      );
+    } catch (error) {
+      debugPrint('No se pudo generar el PDF. Error exacto: $error');
+      throw const DocumentScanException('No se pudo generar el PDF.');
+    }
+  }
+
+  Future<MobileAttachment> _buildPdfAttachmentFromImage({
+    required String imagePath,
     required String mobileNoteId,
+    required String originalFilename,
+    required bool detectedAutomatically,
+    String? fallbackMessage,
   }) async {
-    final originalFile = File(capture.path);
+    final originalFile = File(imagePath);
     final originalBytes = await originalFile.readAsBytes();
     final decoded = img.decodeImage(originalBytes);
-    if (decoded == null) {
-      throw const DocumentScanException('No se pudo procesar la imagen.');
-    }
+    if (decoded == null) throw const DocumentScanException('No se pudo generar el PDF.');
 
     var processed = img.bakeOrientation(decoded);
     processed = _resizeIfNeeded(processed);
-    processed = img.grayscale(processed);
-    processed = img.adjustColor(processed, contrast: 1.18, brightness: 1.03);
-
-    final usePng = _settings.preferPngForDocuments && processed.width * processed.height <= 2500 * 1800;
-    final extension = usePng ? '.png' : '.jpg';
-    final imageFormat = usePng ? 'png' : 'jpg';
-    final mimeType = usePng ? 'image/png' : 'image/jpeg';
-    final encoded = Uint8List.fromList(
-      usePng
-          ? img.encodePng(processed)
-          : img.encodeJpg(processed, quality: _settings.imageQuality),
-    );
+    processed = img.adjustColor(processed, contrast: 1.12, brightness: 1.02, saturation: 0.92);
+    final encoded = Uint8List.fromList(img.encodeJpg(processed, quality: _settings.imageQuality));
 
     final attachmentId = _uuid.v4();
-    final processedPath = p.join(
-      p.dirname(capture.path),
-      '${attachmentId}_document_scan$extension',
+    final pdfFile = await _writeSinglePagePdf(
+      attachmentId: attachmentId,
+      imageBytes: encoded,
     );
-    final processedFile = await File(processedPath).writeAsBytes(encoded, flush: true);
-    final processedSize = await processedFile.length();
+    final pdfSize = await pdfFile.length();
 
     return MobileAttachment(
       mobileAttachmentId: attachmentId,
       mobileNoteId: mobileNoteId,
-      filename: 'document_scan$extension',
-      mimeType: mimeType,
-      localPath: processedPath,
-      size: processedSize,
+      filename: '${attachmentId}_scan.pdf',
+      mimeType: 'application/pdf',
+      localPath: pdfFile.path,
+      size: pdfSize,
       createdAt: DateTime.now(),
       syncStatus: SyncStatus.pending,
+      errorMessage: fallbackMessage,
       captureMode: 'document_scan',
       optimizedForOcr: true,
-      originalFilename: _filenameFor(capture),
+      documentFormat: 'pdf',
+      originalFilename: originalFilename,
       originalSize: originalBytes.length,
-      processedSize: processedSize,
-      imageFormat: imageFormat,
+      processedSize: pdfSize,
+      imageFormat: _extensionWithoutDot(originalFilename),
+      pageCount: 1,
+      scanMode: detectedAutomatically ? 'document' : 'document_fallback',
       width: processed.width,
       height: processed.height,
     );
   }
 
-  Future<MobileAttachment> _buildOriginalAttachment({
-    required XFile capture,
-    required String mobileNoteId,
-    required String errorMessage,
-  }) async {
-    final file = File(capture.path);
-    final filename = _filenameFor(capture);
-    final size = await file.length();
-    final decoded = img.decodeImage(await file.readAsBytes());
-    return MobileAttachment(
-      mobileAttachmentId: _uuid.v4(),
-      mobileNoteId: mobileNoteId,
-      filename: filename,
-      mimeType: capture.mimeType ?? _guessImageMimeType(filename),
-      localPath: capture.path,
-      size: size,
-      createdAt: DateTime.now(),
-      syncStatus: SyncStatus.pending,
-      errorMessage: errorMessage,
-      captureMode: 'document_scan',
-      optimizedForOcr: false,
-      originalFilename: filename,
-      originalSize: size,
-      processedSize: size,
-      imageFormat: _extensionWithoutDot(filename),
-      width: decoded?.width,
-      height: decoded?.height,
+  Future<File> _copyPdfToAttachmentFile({required String sourcePath, required String attachmentId}) async {
+    final destination = await _attachmentPdfFile(attachmentId);
+    final normalizedPath = _normalizeFilePath(sourcePath);
+    return File(normalizedPath).copy(destination.path);
+  }
+
+  String _normalizeFilePath(String value) {
+    final uri = Uri.tryParse(value);
+    if (uri != null && uri.scheme == 'file') return uri.toFilePath();
+    return value;
+  }
+
+  Future<File> _writeSinglePagePdf({required String attachmentId, required Uint8List imageBytes}) async {
+    final pdf = pw.Document();
+    final image = pw.MemoryImage(imageBytes);
+    pdf.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.a4,
+        build: (_) => pw.Center(
+          child: pw.Image(image, fit: pw.BoxFit.contain),
+        ),
+      ),
     );
+    final file = await _attachmentPdfFile(attachmentId);
+    return file.writeAsBytes(await pdf.save(), flush: true);
+  }
+
+  Future<File> _attachmentPdfFile(String attachmentId) async {
+    final directory = await getTemporaryDirectory();
+    return File(p.join(directory.path, '${attachmentId}_scan.pdf'));
   }
 
   img.Image _resizeIfNeeded(img.Image image) {
@@ -164,17 +223,6 @@ class DocumentScanService {
   String _filenameFor(XFile file) => p.basename(file.path).trim().isEmpty ? file.name : p.basename(file.path);
 
   String _extensionWithoutDot(String filename) => p.extension(filename).replaceFirst('.', '').toLowerCase();
-
-  String _guessImageMimeType(String filename) {
-    final extension = p.extension(filename).toLowerCase();
-    return switch (extension) {
-      '.png' => 'image/png',
-      '.webp' => 'image/webp',
-      '.heic' => 'image/heic',
-      '.heif' => 'image/heif',
-      _ => 'image/jpeg',
-    };
-  }
 }
 
 class DocumentScanException implements Exception {

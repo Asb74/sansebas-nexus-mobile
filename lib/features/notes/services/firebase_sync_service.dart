@@ -121,8 +121,10 @@ class FirebaseSyncService {
       await docRef.set(noteToSave.toMap());
 
       for (final attachment in attachments) {
-        final storagePath =
-            'users/$uid/$notesCollection/${noteToSave.mobileNoteId}/${attachment.mobileAttachmentId}_${attachment.filename}';
+        final storageFilename = attachment.captureMode == 'document_scan' && attachment.documentFormat == 'pdf'
+            ? '${attachment.mobileAttachmentId}_scan.pdf'
+            : '${attachment.mobileAttachmentId}_${attachment.filename}';
+        final storagePath = 'users/$uid/$notesCollection/${noteToSave.mobileNoteId}/$storageFilename';
         debugPrint('attachmentId: ${attachment.mobileAttachmentId}');
         debugPrint('storagePath: $storagePath');
 
@@ -135,7 +137,7 @@ class FirebaseSyncService {
           storagePath: storagePath,
           syncStatus: SyncStatus.uploaded,
           importedAt: null,
-          errorMessage: null,
+          clearErrorMessage: true,
         );
         await docRef
             .collection('attachments')
