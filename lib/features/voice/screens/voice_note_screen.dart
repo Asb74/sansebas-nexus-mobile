@@ -20,7 +20,24 @@ import '../../notes/services/attachment_service.dart';
 import '../../notes/services/firebase_sync_service.dart';
 import '../../notes/widgets/note_text_field.dart';
 
-enum _VoiceNoteStatus { ready, listening, transcribing, review, noVoice }
+enum VoiceCaptureMode { note, action }
+
+enum _VoiceNoteStatus { choosing, ready, listening, transcribing, review, noVoice }
+
+String buildSuggestedTitle(String text, {String fallback = 'Nota de voz'}) {
+  final normalized = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (normalized.isEmpty) return fallback;
+
+  var title = normalized.split(' ').take(8).join(' ');
+  if (title.length > 60) {
+    title = title.substring(0, 60).trimRight();
+  }
+  if (title.length < normalized.length) {
+    title = title.replaceFirst(RegExp(r'[\s,.;:!?]+$'), '');
+    title = '$title...';
+  }
+  return title;
+}
 
 class VoiceNoteScreen extends StatefulWidget {
   const VoiceNoteScreen({super.key});
@@ -32,6 +49,7 @@ class VoiceNoteScreen extends StatefulWidget {
 class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   final _titleController = TextEditingController(text: 'Nota de voz');
   final _contentController = TextEditingController();
+  final _actionDueTextController = TextEditingController();
   final _masterService = MasterService();
   final _firebaseSyncService = FirebaseSyncService();
   final _attachmentService = AttachmentService();
@@ -44,7 +62,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   AreaMaster? _selectedArea;
   TopicMaster? _selectedTopic;
   NoteTypeMaster? _selectedType;
-  _VoiceNoteStatus _status = _VoiceNoteStatus.ready;
+  _VoiceNoteStatus _status = _VoiceNoteStatus.choosing;
+  VoiceCaptureMode? _mode;
   bool _isSaving = false;
   bool _attachOriginalAudio = false;
   bool _titleWasEdited = false;
@@ -72,10 +91,26 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     _audioRecorder.dispose();
     _titleController.dispose();
     _contentController.dispose();
+    _actionDueTextController.dispose();
     super.dispose();
   }
 
   bool get _isRecording => _status == _VoiceNoteStatus.listening;
+  bool get _isActionMode => _mode == VoiceCaptureMode.action;
+  String get _defaultTitle => _isActionMode ? 'Acción de voz' : 'Nota de voz';
+  String get _contentLabel => _isActionMode ? 'Texto de acción' : 'Transcripción';
+
+  void _selectMode(VoiceCaptureMode mode) {
+    if (_isSaving || _isRecording) return;
+    setState(() {
+      _mode = mode;
+      _status = _VoiceNoteStatus.ready;
+      _selectedType = null;
+      _titleWasEdited = false;
+      _titleController.text = mode == VoiceCaptureMode.action ? 'Acción de voz' : 'Nota de voz';
+    });
+    _suggestTitleIfNeeded();
+  }
   bool get _hasRecordedAudio => _audioPath != null;
 
   Future<void> _toggleRecording() async {
@@ -241,9 +276,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   }
 
   void _suggestTitleIfNeeded() {
-    if (_titleWasEdited && _titleController.text.trim() != 'Nota de voz') return;
-    final words = _contentController.text.trim().split(RegExp(r'\s+')).where((word) => word.isNotEmpty).take(8).toList();
-    final suggested = words.isEmpty ? 'Nota de voz' : words.join(' ');
+    if (_titleWasEdited && _titleController.text.trim() != _defaultTitle) return;
+    final suggested = buildSuggestedTitle(_contentController.text, fallback: _defaultTitle);
     _updatingSuggestedTitle = true;
     _titleWasEdited = false;
     _titleController.text = suggested;
@@ -270,6 +304,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     if (_isSaving) return;
     final title = _titleController.text.trim();
     final content = _contentController.text.trim();
+    final actionDueText = _actionDueTextController.text.trim();
     final area = _selectedArea;
     final topic = _selectedTopic;
     final type = _selectedType;
@@ -293,7 +328,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
           captureMode: 'audio_dictation',
           filename: 'dictado_${DateTime.now().millisecondsSinceEpoch}.m4a',
           mimeType: 'audio/mp4',
-          source: 'voice_dictation',
+          source: _isActionMode ? 'voice_action' : 'voice_dictation',
           durationSeconds: _audioDurationSeconds,
         ));
       }
@@ -309,7 +344,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         type: type.name,
         tags: const [],
         content: content,
-        source: 'voice_dictation',
+        source: _isActionMode ? 'voice_action' : 'voice_dictation',
         createdAt: now,
         updatedAt: now,
         syncStatus: attachments.isEmpty ? SyncStatus.uploaded : SyncStatus.pending,
@@ -317,6 +352,14 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         deviceId: await _firebaseSyncService.readDeviceId(),
         attachmentsCount: attachments.length,
         voiceTranscription: content,
+        captureMode: _isActionMode ? 'voice_action' : 'voice_note',
+        isActionCandidate: _isActionMode,
+        actionStatus: _isActionMode ? 'pending_review' : null,
+        actionText: _isActionMode ? content : null,
+        actionDueText: _isActionMode && actionDueText.isNotEmpty ? actionDueText : null,
+        calendarEventCandidate: _isActionMode,
+        calendarCreated: false,
+        calendarEventId: null,
       );
       if (attachments.isEmpty) {
         await _firebaseSyncService.createTextNote(note);
@@ -324,7 +367,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         await _firebaseSyncService.createNoteWithAttachments(note: note, attachments: attachments);
       }
       if (!mounted) return;
-      _showMessage('Nota de voz guardada para sincronización.');
+      _showMessage(_isActionMode ? 'Acción de voz guardada para revisión.' : 'Nota de voz guardada para sincronización.');
       Navigator.pop(context);
     } on AttachmentException catch (error) {
       if (mounted) _showMessage(error.message);
@@ -341,6 +384,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   void _showMessage(String message) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 
   String _statusLabel() => switch (_status) {
+        _VoiceNoteStatus.choosing => 'Elige qué quieres crear',
         _VoiceNoteStatus.ready => 'Preparado',
         _VoiceNoteStatus.listening => 'Escuchando...',
         _VoiceNoteStatus.transcribing => 'Transcribiendo...',
@@ -360,14 +404,15 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     return PopScope(
       canPop: !_isRecording && !_isSaving,
       child: Scaffold(
-        appBar: AppBar(title: const Text('Dictar nota')),
+        appBar: AppBar(title: const Text('Captura por voz')),
         body: SafeArea(
           child: FutureBuilder<MasterData>(
             future: _mastersFuture,
             builder: (context, snapshot) {
               final masters = snapshot.data ?? _masterService.fallbackMasterData;
               _selectedArea ??= _findDefault(masters.areas, 'general', (area) => area.name);
-              _selectedType ??= _findDefault(masters.types, 'nota', (type) => type.name);
+              _selectedType ??= _findDefault(masters.types, _isActionMode ? 'tarea' : 'nota', (type) => type.name) ??
+                  _findDefault(masters.types, 'nota', (type) => type.name);
               final topics = _topicsForSelectedArea(masters);
               if (_selectedTopic == null || !topics.contains(_selectedTopic)) {
                 _selectedTopic = _findDefault(topics, 'general', (topic) => topic.name);
@@ -386,10 +431,28 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                         Expanded(child: Text('Sansebas Nexus Mobile', style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700))),
                       ]),
                       const SizedBox(height: 20),
-                      Text('Dictar nota', style: textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+                      Text('Captura por voz', style: textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      Text('Paso 1: Elegir tipo · Paso 2: Dictar · Paso 3: Revisar · Paso 4: Guardar', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
+                      const SizedBox(height: 16),
+                      SegmentedButton<VoiceCaptureMode>(
+                        segments: const [
+                          ButtonSegment(value: VoiceCaptureMode.note, icon: Icon(Icons.note_alt_outlined), label: Text('Nota')),
+                          ButtonSegment(value: VoiceCaptureMode.action, icon: Icon(Icons.task_alt_outlined), label: Text('Acción / recordatorio')),
+                        ],
+                        selected: _mode == null ? const <VoiceCaptureMode>{} : {_mode!},
+                        emptySelectionAllowed: true,
+                        onSelectionChanged: _isSaving || _isRecording ? null : (selection) {
+                          if (selection.isNotEmpty) _selectMode(selection.first);
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      if (_mode != null) Text(_isActionMode ? 'Crear acción' : 'Dictar contenido', style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+                      if (_mode != null) const SizedBox(height: 8),
+                      if (_mode != null) Text(_isActionMode ? 'Dicta la acción o recordatorio. Revise antes de guardar.' : 'Dicta la nota. Revise antes de guardar.', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
                       const SizedBox(height: 16),
                       FilledButton.icon(
-                        onPressed: _isSaving ? null : _toggleRecording,
+                        onPressed: _isSaving || _mode == null ? null : _toggleRecording,
                         icon: Icon(_isRecording ? Icons.stop_circle_outlined : Icons.mic_none_outlined),
                         label: Padding(
                           padding: const EdgeInsets.symmetric(vertical: 14),
@@ -403,7 +466,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                         subtitle: Text('Duración: ${_formatDuration(_recordingDuration)}${_hasRecordedAudio ? ' · Audio original listo' : ''}'),
                       )),
                       const SizedBox(height: 16),
-                      NoteTextField(controller: _titleController, label: 'Título', hintText: 'Nota de voz', textInputAction: TextInputAction.next),
+                      NoteTextField(controller: _titleController, label: 'Título', hintText: _defaultTitle, textInputAction: TextInputAction.next),
                       const SizedBox(height: 16),
                       _MasterDropdown<AreaMaster>(
                         label: 'Área', value: _selectedArea, items: masters.areas, itemLabel: (area) => area.name,
@@ -422,12 +485,21 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                       const SizedBox(height: 16),
                       NoteTextField(
                         controller: _contentController,
-                        label: 'Transcripción',
-                        hintText: 'La transcripción aparecerá aquí. Revísela antes de guardar.',
+                        label: _contentLabel,
+                        hintText: _isActionMode ? 'La acción o recordatorio aparecerá aquí. Revísela antes de guardar.' : 'La transcripción aparecerá aquí. Revísela antes de guardar.',
                         keyboardType: TextInputType.multiline,
                         minLines: 6,
                         maxLines: 12,
                       ),
+                      if (_isActionMode) ...[
+                        const SizedBox(height: 16),
+                        NoteTextField(
+                          controller: _actionDueTextController,
+                          label: 'Fecha/hora opcional (texto libre)',
+                          hintText: 'Ej.: mañana por la tarde, viernes 10:00...',
+                          textInputAction: TextInputAction.next,
+                        ),
+                      ],
                       const SizedBox(height: 8),
                       CheckboxListTile(
                         value: _attachOriginalAudio,
@@ -438,9 +510,9 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                       ),
                       const SizedBox(height: 24),
                       FilledButton.icon(
-                        onPressed: _isSaving || _isRecording ? null : _saveNote,
+                        onPressed: _isSaving || _isRecording || _mode == null ? null : _saveNote,
                         icon: _isSaving ? const SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.check_circle_outline),
-                        label: Text(_isSaving ? 'Guardando...' : 'Guardar nota'),
+                        label: Text(_isSaving ? 'Guardando...' : (_isActionMode ? 'Guardar acción' : 'Guardar nota')),
                       ),
                       const SizedBox(height: 12),
                       OutlinedButton.icon(
