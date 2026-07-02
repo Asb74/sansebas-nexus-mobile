@@ -58,12 +58,14 @@ class DocumentScanService {
       final result = await scanner.scanDocument();
       final pdfPath = result.pdf?.uri;
       final imagePaths = result.images;
+      if (imagePaths == null || imagePaths.isEmpty) return null;
+      final firstImagePath = imagePaths.first;
+
       if (pdfPath == null || pdfPath.isEmpty) {
-        if (imagePaths.isEmpty) return null;
         return _buildPdfAttachmentFromImage(
-          imagePath: imagePaths.first,
+          imagePath: firstImagePath,
           mobileNoteId: mobileNoteId,
-          originalFilename: p.basename(imagePaths.first),
+          originalFilename: p.basename(firstImagePath),
           detectedAutomatically: true,
         );
       }
@@ -74,9 +76,9 @@ class DocumentScanService {
         attachmentId: attachmentId,
       );
       final pdfSize = await pdfFile.length();
-      final firstImage = imagePaths.isNotEmpty ? File(imagePaths.first) : null;
-      final dimensions = firstImage == null ? null : img.decodeImage(await firstImage.readAsBytes());
-      final originalSize = firstImage == null ? pdfSize : await firstImage.length();
+      final firstImage = File(firstImagePath);
+      final dimensions = img.decodeImage(await firstImage.readAsBytes());
+      final originalSize = await firstImage.length();
 
       return MobileAttachment(
         mobileAttachmentId: attachmentId,
@@ -90,10 +92,10 @@ class DocumentScanService {
         captureMode: 'document_scan',
         optimizedForOcr: true,
         documentFormat: 'pdf',
-        originalFilename: firstImage == null ? p.basename(pdfPath) : p.basename(firstImage.path),
+        originalFilename: p.basename(firstImage.path),
         originalSize: originalSize,
         processedSize: pdfSize,
-        imageFormat: firstImage == null ? null : _extensionWithoutDot(firstImage.path),
+        imageFormat: _extensionWithoutDot(firstImage.path),
         pageCount: 1,
         scanMode: 'document',
         width: dimensions?.width,
