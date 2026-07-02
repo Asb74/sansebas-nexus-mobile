@@ -24,6 +24,14 @@ class MobileNote {
     this.latitude,
     this.longitude,
     this.voiceTranscription,
+    this.captureMode,
+    this.isActionCandidate = false,
+    this.actionStatus,
+    this.actionText,
+    this.actionDueText,
+    this.calendarEventCandidate = false,
+    this.calendarCreated = false,
+    this.calendarEventId,
     this.importedAt,
     this.importedByDesktopId,
     this.errorMessage,
@@ -49,6 +57,14 @@ class MobileNote {
   final double? latitude;
   final double? longitude;
   final String? voiceTranscription;
+  final String? captureMode;
+  final bool isActionCandidate;
+  final String? actionStatus;
+  final String? actionText;
+  final String? actionDueText;
+  final bool calendarEventCandidate;
+  final bool calendarCreated;
+  final String? calendarEventId;
   final DateTime? importedAt;
   final String? importedByDesktopId;
   final String? errorMessage;
@@ -79,6 +95,14 @@ class MobileNote {
       'latitude': latitude,
       'longitude': longitude,
       'voice_transcription': voiceTranscription,
+      'capture_mode': captureMode,
+      'is_action_candidate': isActionCandidate,
+      'action_status': actionStatus,
+      'action_text': actionText,
+      'action_due_text': actionDueText,
+      'calendar_event_candidate': calendarEventCandidate,
+      'calendar_created': calendarCreated,
+      'calendar_event_id': calendarEventId,
       'imported_at': importedAt?.toIso8601String(),
       'imported_by_desktop_id': importedByDesktopId,
       'error_message': errorMessage,
@@ -113,6 +137,19 @@ class MobileNote {
       longitude: (map['longitude'] as num?)?.toDouble(),
       voiceTranscription: _readNullableString(map['voice_transcription']) ??
           _readNullableString(map['voiceTranscription']),
+      captureMode: _readNullableString(map['capture_mode']) ??
+          _readNullableString(map['captureMode']),
+      isActionCandidate: _readBool(map['is_action_candidate'] ?? map['isActionCandidate']),
+      actionStatus: _readNullableString(map['action_status']) ??
+          _readNullableString(map['actionStatus']),
+      actionText: _readNullableString(map['action_text']) ??
+          _readNullableString(map['actionText']),
+      actionDueText: _readNullableString(map['action_due_text']) ??
+          _readNullableString(map['actionDueText']),
+      calendarEventCandidate: _readBool(map['calendar_event_candidate'] ?? map['calendarEventCandidate']),
+      calendarCreated: _readBool(map['calendar_created'] ?? map['calendarCreated']),
+      calendarEventId: _readNullableString(map['calendar_event_id']) ??
+          _readNullableString(map['calendarEventId']),
       importedAt: _readDateTime(map['imported_at'] ?? map['importedAt']),
       importedByDesktopId: _readNullableString(map['imported_by_desktop_id']) ??
           _readNullableString(map['importedByDesktopId']),
@@ -143,6 +180,14 @@ class MobileNote {
     double? latitude,
     double? longitude,
     String? voiceTranscription,
+    String? captureMode,
+    bool? isActionCandidate,
+    String? actionStatus,
+    String? actionText,
+    String? actionDueText,
+    bool? calendarEventCandidate,
+    bool? calendarCreated,
+    String? calendarEventId,
     DateTime? importedAt,
     String? importedByDesktopId,
     String? errorMessage,
@@ -168,6 +213,14 @@ class MobileNote {
       latitude: latitude ?? this.latitude,
       longitude: longitude ?? this.longitude,
       voiceTranscription: voiceTranscription ?? this.voiceTranscription,
+      captureMode: captureMode ?? this.captureMode,
+      isActionCandidate: isActionCandidate ?? this.isActionCandidate,
+      actionStatus: actionStatus ?? this.actionStatus,
+      actionText: actionText ?? this.actionText,
+      actionDueText: actionDueText ?? this.actionDueText,
+      calendarEventCandidate: calendarEventCandidate ?? this.calendarEventCandidate,
+      calendarCreated: calendarCreated ?? this.calendarCreated,
+      calendarEventId: calendarEventId ?? this.calendarEventId,
       importedAt: importedAt ?? this.importedAt,
       importedByDesktopId: importedByDesktopId ?? this.importedByDesktopId,
       errorMessage: errorMessage ?? this.errorMessage,
@@ -193,6 +246,13 @@ class MobileNote {
     if (value is int) return value;
     if (value is num) return value.toInt();
     return 0;
+  }
+
+  static bool _readBool(dynamic value) {
+    if (value is bool) return value;
+    if (value is String) return value.toLowerCase() == 'true';
+    if (value is num) return value != 0;
+    return false;
   }
 
   static DateTime? _readDateTime(dynamic value) {
