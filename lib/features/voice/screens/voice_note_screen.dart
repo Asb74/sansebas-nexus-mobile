@@ -20,7 +20,7 @@ import '../../notes/services/attachment_service.dart';
 import '../../notes/services/firebase_sync_service.dart';
 import '../../notes/widgets/note_text_field.dart';
 
-enum _VoiceNoteStatus { ready, recording, transcribing, review }
+enum _VoiceNoteStatus { ready, listening, transcribing, review, noVoice }
 
 class VoiceNoteScreen extends StatefulWidget {
   const VoiceNoteScreen({super.key});
@@ -75,7 +75,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     super.dispose();
   }
 
-  bool get _isRecording => _status == _VoiceNoteStatus.recording;
+  bool get _isRecording => _status == _VoiceNoteStatus.listening;
+  bool get _hasRecordedAudio => _audioPath != null;
 
   Future<void> _toggleRecording() async {
     if (_isSaving) return;
@@ -88,40 +89,56 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
 
   Future<void> _startRecording() async {
     try {
-      if (!await _audioRecorder.hasPermission()) {
-        _showMessage('Permiso de micrófono denegado.');
+      final permissionGranted = await _audioRecorder.hasPermission();
+      debugPrint('Dictado voz - permission granted: $permissionGranted');
+      if (!permissionGranted) {
+        _showMessage('Permiso de micrófono denegado');
         return;
       }
 
-      final speechReady = await _speech.initialize(
+      final available = await _speech.initialize(
         onStatus: _onSpeechStatus,
         onError: _onSpeechError,
+        debugLogging: true,
       );
-      if (!speechReady) {
-        _showMessage('No se pudo iniciar el reconocimiento de voz.');
+      debugPrint('Dictado voz - speech available: $available');
+      if (!available) {
+        _showMessage('Reconocimiento de voz no disponible en este dispositivo');
         return;
       }
 
-      final directory = await getTemporaryDirectory();
-      final path = '${directory.path}/${_uuid.v4()}.m4a';
-      await _audioRecorder.start(
-        const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 128000, sampleRate: 44100),
-        path: path,
+      final localeId = await _preferredSpanishLocaleId();
+      debugPrint(
+        'Dictado voz - locale seleccionado: ${localeId ?? 'predeterminado del dispositivo'}',
       );
-      await _speech.listen(
-        onResult: _onSpeechResult,
-        listenMode: ListenMode.dictation,
-        partialResults: true,
-      );
+
+      String? path;
+      if (_attachOriginalAudio) {
+        final directory = await getTemporaryDirectory();
+        path = '${directory.path}/${_uuid.v4()}.m4a';
+        await _audioRecorder.start(
+          const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 128000, sampleRate: 44100),
+          path: path,
+        );
+      }
 
       if (!mounted) return;
       setState(() {
-        _status = _VoiceNoteStatus.recording;
+        _status = _VoiceNoteStatus.listening;
         _recordingStartedAt = DateTime.now();
         _recordingDuration = Duration.zero;
         _audioPath = path;
         _audioDurationSeconds = null;
       });
+
+      await _speech.listen(
+        onResult: _onSpeechResult,
+        listenMode: ListenMode.dictation,
+        partialResults: true,
+        localeId: localeId,
+      );
+      debugPrint('Dictado voz - listening: ${_speech.isListening}');
+
       _durationTimer?.cancel();
       _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
         final startedAt = _recordingStartedAt;
@@ -131,9 +148,29 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       });
     } catch (error) {
       debugPrint('No se pudo iniciar dictado. Error exacto: $error');
+      await _stopAudioRecorderIfNeeded();
       if (!mounted) return;
       setState(() => _status = _VoiceNoteStatus.ready);
-      _showMessage('No se pudo iniciar el reconocimiento de voz.');
+      _showMessage('Reconocimiento de voz no disponible en este dispositivo');
+    }
+  }
+
+  Future<String?> _preferredSpanishLocaleId() async {
+    final locales = await _speech.locales();
+    for (final preferred in const ['es_ES', 'es-ES']) {
+      for (final locale in locales) {
+        if (locale.localeId == preferred) return locale.localeId;
+      }
+    }
+    for (final locale in locales) {
+      if (locale.localeId.toLowerCase().startsWith('es')) return locale.localeId;
+    }
+    return null;
+  }
+
+  Future<void> _stopAudioRecorderIfNeeded() async {
+    if (await _audioRecorder.isRecording()) {
+      await _audioRecorder.stop();
     }
   }
 
@@ -143,30 +180,37 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     final startedAt = _recordingStartedAt;
     try {
       await _speech.stop();
-      final stoppedPath = await _audioRecorder.stop();
+      final stoppedPath = await _audioRecorder.isRecording()
+          ? await _audioRecorder.stop()
+          : _audioPath;
       if (!mounted) return;
       setState(() {
-        _status = _VoiceNoteStatus.review;
+        _status = _contentController.text.trim().isEmpty
+            ? _VoiceNoteStatus.noVoice
+            : _VoiceNoteStatus.review;
         _audioPath = stoppedPath ?? _audioPath;
         _audioDurationSeconds = startedAt == null ? null : DateTime.now().difference(startedAt).inSeconds;
         _recordingStartedAt = null;
       });
       _suggestTitleIfNeeded();
       if (_contentController.text.trim().isEmpty) {
-        _showMessage('No se detectó voz.');
+        _showMessage('No se detectó voz');
       } else {
-        _showMessage('Revise la transcripción antes de guardar.');
+        _showMessage('Transcripción lista para revisar');
       }
     } catch (error) {
       debugPrint('No se pudo detener dictado. Error exacto: $error');
       if (!mounted) return;
       setState(() => _status = _VoiceNoteStatus.review);
-      _showMessage('Revise la transcripción antes de guardar.');
+      _showMessage('Transcripción lista para revisar');
     }
   }
 
   void _onSpeechResult(SpeechRecognitionResult result) {
     if (!mounted) return;
+    debugPrint(
+      'Dictado voz - palabras ${result.finalResult ? 'resultado final' : 'parciales'}: ${result.recognizedWords}',
+    );
     _contentController.text = result.recognizedWords;
     _contentController.selection = TextSelection.collapsed(offset: _contentController.text.length);
     _suggestTitleIfNeeded();
@@ -175,14 +219,25 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   void _onSpeechStatus(String status) {
     if (!mounted) return;
     if (status == 'notListening' || status == 'done') {
-      debugPrint('Reconocimiento de voz finalizó: $status');
+      debugPrint('Dictado voz - listening false, estado speech_to_text: $status');
+      if (_isRecording) {
+        Future.microtask(_stopRecording);
+      }
+    } else if (status == 'listening') {
+      debugPrint('Dictado voz - listening true');
     }
   }
 
   void _onSpeechError(SpeechRecognitionError error) {
-    debugPrint('Error reconocimiento voz: ${error.errorMsg}');
+    debugPrint(
+      'Dictado voz - errores del speech_to_text: ${error.errorMsg}, permanent: ${error.permanent}',
+    );
     if (!mounted) return;
-    if (error.permanent) _showMessage('No se pudo iniciar el reconocimiento de voz.');
+    if (error.errorMsg == 'error_no_match' || error.errorMsg == 'error_speech_timeout') {
+      _showMessage('No se detectó voz');
+    } else if (error.permanent) {
+      _showMessage('Reconocimiento de voz no disponible en este dispositivo');
+    }
   }
 
   void _suggestTitleIfNeeded() {
@@ -287,9 +342,10 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
 
   String _statusLabel() => switch (_status) {
         _VoiceNoteStatus.ready => 'Preparado',
-        _VoiceNoteStatus.recording => 'Grabando...',
+        _VoiceNoteStatus.listening => 'Escuchando...',
         _VoiceNoteStatus.transcribing => 'Transcribiendo...',
         _VoiceNoteStatus.review => 'Listo para revisar',
+        _VoiceNoteStatus.noVoice => 'No se detectó voz',
       };
 
   String _formatDuration(Duration duration) {
@@ -337,14 +393,14 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                         icon: Icon(_isRecording ? Icons.stop_circle_outlined : Icons.mic_none_outlined),
                         label: Padding(
                           padding: const EdgeInsets.symmetric(vertical: 14),
-                          child: Text(_isRecording ? 'Detener grabación' : 'Iniciar grabación'),
+                          child: Text(_isRecording ? 'Detener dictado' : 'Iniciar dictado'),
                         ),
                       ),
                       const SizedBox(height: 12),
                       Card(child: ListTile(
                         leading: Icon(_isRecording ? Icons.graphic_eq : Icons.info_outline, color: AppColors.primaryBlue),
                         title: Text(_statusLabel()),
-                        subtitle: Text('Duración: ${_formatDuration(_recordingDuration)}'),
+                        subtitle: Text('Duración: ${_formatDuration(_recordingDuration)}${_hasRecordedAudio ? ' · Audio original listo' : ''}'),
                       )),
                       const SizedBox(height: 16),
                       NoteTextField(controller: _titleController, label: 'Título', hintText: 'Nota de voz', textInputAction: TextInputAction.next),
@@ -375,7 +431,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                       const SizedBox(height: 8),
                       CheckboxListTile(
                         value: _attachOriginalAudio,
-                        onChanged: _isSaving ? null : (value) => setState(() => _attachOriginalAudio = value ?? false),
+                        onChanged: _isSaving || _isRecording ? null : (value) => setState(() => _attachOriginalAudio = value ?? false),
                         title: const Text('Adjuntar audio original'),
                         controlAffinity: ListTileControlAffinity.leading,
                         contentPadding: EdgeInsets.zero,
@@ -419,7 +475,11 @@ class _MasterDropdown<T> extends StatelessWidget {
       value: value,
       items: items.map((item) => DropdownMenuItem<T>(value: item, child: Text(itemLabel(item)))).toList(growable: false),
       onChanged: items.isEmpty ? null : onChanged,
-      decoration: InputDecoration(labelText: label),
+      decoration: InputDecoration(
+        labelText: label,
+        floatingLabelBehavior: FloatingLabelBehavior.always,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+      ),
     );
   }
 }
