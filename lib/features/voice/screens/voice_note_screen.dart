@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:android_intent_plus/android_intent.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -23,6 +25,59 @@ import '../../notes/widgets/note_text_field.dart';
 enum VoiceCaptureMode { note, action }
 
 enum _VoiceNoteStatus { choosing, ready, listening, transcribing, review, noVoice }
+
+
+class ParsedSpanishDue {
+  const ParsedSpanishDue({this.dueAt, this.confidence = 0});
+  final DateTime? dueAt;
+  final double confidence;
+}
+
+ParsedSpanishDue parseSpanishDueText(String input, {DateTime? now}) {
+  final base = now ?? DateTime.now();
+  final text = input.toLowerCase().replaceAll(RegExp(r'[á]'), 'a').replaceAll('é', 'e').replaceAll('í', 'i').replaceAll('ó', 'o').replaceAll('ú', 'u').trim();
+  if (text.isEmpty) return const ParsedSpanishDue();
+  var date = DateTime(base.year, base.month, base.day);
+  var dateFound = false;
+  if (text.contains('pasado manana')) { date = date.add(const Duration(days: 2)); dateFound = true; }
+  else if (text.contains('manana')) { date = date.add(const Duration(days: 1)); dateFound = true; }
+  else if (text.contains('hoy')) { dateFound = true; }
+  final weekdays = {'lunes':1,'martes':2,'miercoles':3,'jueves':4,'viernes':5,'sabado':6,'domingo':7};
+  for (final entry in weekdays.entries) {
+    if (RegExp('(?:el )?${entry.key}(?: que viene)?').hasMatch(text)) {
+      var delta = entry.value - base.weekday;
+      if (delta <= 0 || text.contains('que viene')) delta += 7;
+      date = DateTime(base.year, base.month, base.day).add(Duration(days: delta));
+      dateFound = true;
+      break;
+    }
+  }
+  final months = {'enero':1,'febrero':2,'marzo':3,'abril':4,'mayo':5,'junio':6,'julio':7,'agosto':8,'septiembre':9,'setiembre':9,'octubre':10,'noviembre':11,'diciembre':12};
+  final dateMatch = RegExp(r'(?:dia )?(\d{1,2}) de ([a-z]+)').firstMatch(text);
+  if (dateMatch != null && months.containsKey(dateMatch.group(2))) {
+    final day = int.parse(dateMatch.group(1)!); final month = months[dateMatch.group(2)]!;
+    var year = base.year;
+    if (DateTime(year, month, day).isBefore(DateTime(base.year, base.month, base.day))) year++;
+    date = DateTime(year, month, day); dateFound = true;
+  }
+  int? hour; int minute = 0;
+  final numberWords = {'una':1,'uno':1,'dos':2,'tres':3,'cuatro':4,'cinco':5,'seis':6,'siete':7,'ocho':8,'nueve':9,'diez':10,'once':11,'doce':12};
+  final numeric = RegExp(r'a las (\d{1,2})(?::(\d{2}))?').firstMatch(text);
+  if (numeric != null) { hour = int.parse(numeric.group(1)!); minute = int.tryParse(numeric.group(2) ?? '0') ?? 0; }
+  else {
+    for (final entry in numberWords.entries) {
+      if (text.contains('a las ${entry.key}')) { hour = entry.value; break; }
+    }
+    if (hour != null && text.contains('media')) minute = 30;
+  }
+  if (text.contains('mediodia')) { hour = 12; minute = 0; }
+  if (hour == null && text.contains('esta tarde')) { hour = 17; minute = 0; dateFound = true; }
+  if (hour == null && text.contains('por la manana')) { hour = 9; minute = 0; }
+  if (hour != null && hour < 12 && (text.contains('tarde') || text.contains('noche'))) hour += 12;
+  if (hour != null && text.contains('manana') && text.contains('de la manana') && hour == 12) hour = 0;
+  if (!dateFound && hour == null) return const ParsedSpanishDue();
+  return ParsedSpanishDue(dueAt: DateTime(date.year, date.month, date.day, hour ?? 9, minute), confidence: dateFound && hour != null ? .9 : .65);
+}
 
 String buildSuggestedTitle(String text, {String fallback = 'Nota de voz'}) {
   final normalized = text.replaceAll(RegExp(r'\s+'), ' ').trim();
@@ -49,6 +104,8 @@ class VoiceNoteScreen extends StatefulWidget {
 class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   final _titleController = TextEditingController(text: 'Nota de voz');
   final _contentController = TextEditingController();
+  final _actionTitleController = TextEditingController();
+  final _actionDescriptionController = TextEditingController();
   final _actionDueTextController = TextEditingController();
   final _masterService = MasterService();
   final _firebaseSyncService = FirebaseSyncService();
@@ -73,6 +130,14 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   Timer? _durationTimer;
   String? _audioPath;
   int? _audioDurationSeconds;
+  String _finalSpeechBuffer = '';
+  String _lastPartialSpeech = '';
+  bool _manualStopRequested = false;
+  bool _speechUnavailable = false;
+  String _dictationStateLabel = 'Finalizado';
+  int _actionStep = 0;
+  DateTime? _parsedDueAt;
+  double? _parsedDueConfidence;
 
   @override
   void initState() {
@@ -91,6 +156,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     _audioRecorder.dispose();
     _titleController.dispose();
     _contentController.dispose();
+    _actionTitleController.dispose();
+    _actionDescriptionController.dispose();
     _actionDueTextController.dispose();
     super.dispose();
   }
@@ -166,12 +233,10 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         _audioDurationSeconds = null;
       });
 
-      await _speech.listen(
-        onResult: _onSpeechResult,
-        listenMode: ListenMode.dictation,
-        partialResults: true,
-        localeId: localeId,
-      );
+      _manualStopRequested = false;
+      _speechUnavailable = false;
+      _primeSpeechBuffer();
+      await _listenContinuously(localeId: localeId);
       debugPrint('Dictado voz - listening: ${_speech.isListening}');
 
       _durationTimer?.cancel();
@@ -214,6 +279,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     _durationTimer?.cancel();
     final startedAt = _recordingStartedAt;
     try {
+      _manualStopRequested = true;
       await _speech.stop();
       final stoppedPath = await _audioRecorder.isRecording()
           ? await _audioRecorder.stop()
@@ -226,6 +292,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         _audioPath = stoppedPath ?? _audioPath;
         _audioDurationSeconds = startedAt == null ? null : DateTime.now().difference(startedAt).inSeconds;
         _recordingStartedAt = null;
+        _dictationStateLabel = 'Finalizado';
       });
       _suggestTitleIfNeeded();
       if (_contentController.text.trim().isEmpty) {
@@ -241,22 +308,77 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     }
   }
 
+  TextEditingController get _activeDictationController {
+    if (!_isActionMode) return _contentController;
+    return switch (_actionStep) {
+      0 => _actionTitleController,
+      1 => _actionDescriptionController,
+      2 => _actionDueTextController,
+      _ => _actionDescriptionController,
+    };
+  }
+
+  void _primeSpeechBuffer() {
+    final text = _activeDictationController.text.trim();
+    _finalSpeechBuffer = text;
+    _lastPartialSpeech = '';
+    _dictationStateLabel = 'Escuchando...';
+  }
+
+  Future<void> _listenContinuously({String? localeId}) async {
+    await _speech.listen(
+      onResult: _onSpeechResult,
+      listenMode: ListenMode.dictation,
+      partialResults: true,
+      listenFor: const Duration(minutes: 10),
+      pauseFor: const Duration(seconds: 12),
+      localeId: localeId,
+    );
+  }
+
+  Future<void> _restartSpeechAfterPause() async {
+    if (!_isRecording || _manualStopRequested || _speechUnavailable || _speech.isListening) return;
+    setState(() => _dictationStateLabel = 'Pausa detectada, continuando...');
+    await Future<void>.delayed(const Duration(milliseconds: 450));
+    if (!_isRecording || _manualStopRequested || _speechUnavailable) return;
+    try {
+      await _listenContinuously(localeId: await _preferredSpanishLocaleId());
+      if (mounted) setState(() => _dictationStateLabel = 'Escuchando...');
+    } catch (error) {
+      debugPrint('No se pudo reanudar dictado continuo: $error');
+    }
+  }
+
   void _onSpeechResult(SpeechRecognitionResult result) {
     if (!mounted) return;
-    debugPrint(
-      'Dictado voz - palabras ${result.finalResult ? 'resultado final' : 'parciales'}: ${result.recognizedWords}',
-    );
-    _contentController.text = result.recognizedWords;
-    _contentController.selection = TextSelection.collapsed(offset: _contentController.text.length);
-    _suggestTitleIfNeeded();
+    final recognized = result.recognizedWords.trim();
+    if (recognized.isEmpty) return;
+    if (result.finalResult) {
+      if (!_finalSpeechBuffer.endsWith(recognized)) {
+        _finalSpeechBuffer = [_finalSpeechBuffer, recognized].where((part) => part.trim().isNotEmpty).join(' ');
+      }
+      _lastPartialSpeech = '';
+    } else {
+      _lastPartialSpeech = recognized;
+    }
+    final merged = [_finalSpeechBuffer, _lastPartialSpeech].where((part) => part.trim().isNotEmpty).join(' ').trim();
+    final controller = _activeDictationController;
+    controller.text = merged;
+    controller.selection = TextSelection.collapsed(offset: controller.text.length);
+    if (_isActionMode) {
+      _syncActionContent();
+      if (_actionStep == 2) _parseDueText();
+    } else {
+      _suggestTitleIfNeeded();
+    }
   }
 
   void _onSpeechStatus(String status) {
     if (!mounted) return;
     if (status == 'notListening' || status == 'done') {
       debugPrint('Dictado voz - listening false, estado speech_to_text: $status');
-      if (_isRecording) {
-        Future.microtask(_stopRecording);
+      if (_isRecording && !_manualStopRequested && !_speechUnavailable) {
+        Future.microtask(_restartSpeechAfterPause);
       }
     } else if (status == 'listening') {
       debugPrint('Dictado voz - listening true');
@@ -271,6 +393,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     if (error.errorMsg == 'error_no_match' || error.errorMsg == 'error_speech_timeout') {
       _showMessage('No se detectó voz');
     } else if (error.permanent) {
+      _speechUnavailable = true;
       _showMessage('Reconocimiento de voz no disponible en este dispositivo');
     }
   }
@@ -283,6 +406,20 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     _titleController.text = suggested;
     _titleController.selection = TextSelection.collapsed(offset: _titleController.text.length);
     _updatingSuggestedTitle = false;
+  }
+
+  void _syncActionContent() {
+    _contentController.text = [_actionTitleController.text.trim(), _actionDescriptionController.text.trim()]
+        .where((part) => part.isNotEmpty)
+        .join('\n\n');
+  }
+
+  void _parseDueText() {
+    final parsed = parseSpanishDueText(_actionDueTextController.text, now: DateTime.now());
+    setState(() {
+      _parsedDueAt = parsed.dueAt;
+      _parsedDueConfidence = parsed.confidence;
+    });
   }
 
   List<TopicMaster> _topicsForSelectedArea(MasterData masters) {
@@ -300,9 +437,11 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     return items.firstOrNull;
   }
 
-  Future<void> _saveNote() async {
+  Future<void> _saveNote({bool? calendarCreatedOverride, String? actionStatusOverride, bool popAfterSave = true}) async {
     if (_isSaving) return;
-    final title = _titleController.text.trim();
+    if (_isActionMode) _syncActionContent();
+    _parseDueText();
+    final title = _isActionMode && _actionTitleController.text.trim().isNotEmpty ? _actionTitleController.text.trim() : _titleController.text.trim();
     final content = _contentController.text.trim();
     final actionDueText = _actionDueTextController.text.trim();
     final area = _selectedArea;
@@ -343,7 +482,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         typeId: type.id,
         type: type.name,
         tags: const [],
-        content: content,
+        content: _isActionMode ? [_actionTitleController.text.trim(), _actionDescriptionController.text.trim()].where((p) => p.isNotEmpty).join('\n\n') : content,
         source: _isActionMode ? 'voice_action' : 'voice_dictation',
         createdAt: now,
         updatedAt: now,
@@ -351,14 +490,18 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         userId: uid,
         deviceId: await _firebaseSyncService.readDeviceId(),
         attachmentsCount: attachments.length,
-        voiceTranscription: content,
+        voiceTranscription: _isActionMode ? [_actionTitleController.text.trim(), _actionDescriptionController.text.trim(), _actionDueTextController.text.trim()].where((p) => p.isNotEmpty).join('\n\n') : content,
         captureMode: _isActionMode ? 'voice_action' : 'voice_note',
         isActionCandidate: _isActionMode,
-        actionStatus: _isActionMode ? 'pending_review' : null,
-        actionText: _isActionMode ? content : null,
+        actionStatus: _isActionMode ? (actionStatusOverride ?? 'pending_review') : null,
+        actionText: _isActionMode ? [_actionTitleController.text.trim(), _actionDescriptionController.text.trim()].where((p) => p.isNotEmpty).join('\n\n') : null,
+        actionTitle: _isActionMode ? _actionTitleController.text.trim() : null,
+        actionDescription: _isActionMode ? _actionDescriptionController.text.trim() : null,
         actionDueText: _isActionMode && actionDueText.isNotEmpty ? actionDueText : null,
+        parsedDueAt: _isActionMode ? _parsedDueAt : null,
+        parsedDueConfidence: _isActionMode ? _parsedDueConfidence : null,
         calendarEventCandidate: _isActionMode,
-        calendarCreated: false,
+        calendarCreated: calendarCreatedOverride ?? false,
         calendarEventId: null,
       );
       if (attachments.isEmpty) {
@@ -368,7 +511,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       }
       if (!mounted) return;
       _showMessage(_isActionMode ? 'Acción de voz guardada para revisión.' : 'Nota de voz guardada para sincronización.');
-      Navigator.pop(context);
+      if (popAfterSave) Navigator.pop(context);
     } on AttachmentException catch (error) {
       if (mounted) _showMessage(error.message);
     } on FirebaseSyncException catch (error) {
@@ -381,12 +524,43 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     }
   }
 
+  Future<void> _createCalendarEvent({bool saveSummary = true}) async {
+    _parseDueText();
+    final dueAt = _parsedDueAt;
+    if (dueAt == null) return _showMessage('No se pudo interpretar la fecha');
+    final title = _actionTitleController.text.trim();
+    if (title.isEmpty) return _showMessage('El título de la acción es obligatorio');
+    if (!Platform.isAndroid) return _showMessage('Calendar Intent solo está disponible en Android');
+    final endAt = dueAt.add(const Duration(minutes: 30));
+    final intent = AndroidIntent(
+      action: 'android.intent.action.INSERT',
+      type: 'vnd.android.cursor.item/event',
+      arguments: {
+        'title': title,
+        'description': _actionDescriptionController.text.trim(),
+        'beginTime': dueAt.millisecondsSinceEpoch,
+        'endTime': endAt.millisecondsSinceEpoch,
+        'allDay': false,
+        'hasAlarm': true,
+      },
+    );
+    await intent.launch();
+    if (saveSummary) {
+      await _saveActionSummary(calendarCreated: true, status: 'sent_to_calendar');
+    }
+  }
+
+  Future<void> _saveActionSummary({required bool calendarCreated, required String status}) async {
+    if (!_isActionMode) return;
+    await _saveNote(calendarCreatedOverride: calendarCreated, actionStatusOverride: status, popAfterSave: false);
+  }
+
   void _showMessage(String message) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 
   String _statusLabel() => switch (_status) {
         _VoiceNoteStatus.choosing => 'Elige qué quieres crear',
         _VoiceNoteStatus.ready => 'Preparado',
-        _VoiceNoteStatus.listening => 'Escuchando...',
+        _VoiceNoteStatus.listening => _dictationStateLabel,
         _VoiceNoteStatus.transcribing => 'Transcribiendo...',
         _VoiceNoteStatus.review => 'Listo para revisar',
         _VoiceNoteStatus.noVoice => 'No se detectó voz',
@@ -483,22 +657,44 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                         onChanged: _isSaving ? null : (type) => setState(() => _selectedType = type),
                       ),
                       const SizedBox(height: 16),
-                      NoteTextField(
-                        controller: _contentController,
-                        label: _contentLabel,
-                        hintText: _isActionMode ? 'La acción o recordatorio aparecerá aquí. Revísela antes de guardar.' : 'La transcripción aparecerá aquí. Revísela antes de guardar.',
-                        keyboardType: TextInputType.multiline,
-                        minLines: 6,
-                        maxLines: 12,
-                      ),
-                      if (_isActionMode) ...[
-                        const SizedBox(height: 16),
+                      if (!_isActionMode) ...[
                         NoteTextField(
-                          controller: _actionDueTextController,
-                          label: 'Fecha/hora opcional (texto libre)',
-                          hintText: 'Ej.: mañana por la tarde, viernes 10:00...',
-                          textInputAction: TextInputAction.next,
+                          controller: _contentController,
+                          label: _contentLabel,
+                          hintText: 'La transcripción aparecerá aquí. Revísela antes de guardar.',
+                          keyboardType: TextInputType.multiline,
+                          minLines: 6,
+                          maxLines: 12,
                         ),
+                      ] else ...[
+                        Text('Asistente de acción: paso ${_actionStep + 1} de 4', style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+                        const SizedBox(height: 12),
+                        if (_actionStep == 0)
+                          NoteTextField(controller: _actionTitleController, label: '¿Qué quieres hacer?', hintText: 'Llamar a Johana', textInputAction: TextInputAction.next),
+                        if (_actionStep == 1)
+                          NoteTextField(controller: _actionDescriptionController, label: 'Añade detalles', hintText: 'Preguntar si mañana el pedido de Free está hecho', keyboardType: TextInputType.multiline, minLines: 4, maxLines: 8),
+                        if (_actionStep == 2) ...[
+                          NoteTextField(controller: _actionDueTextController, label: '¿Cuándo quieres recordarlo?', hintText: 'mañana a las ocho y media', textInputAction: TextInputAction.next),
+                          const SizedBox(height: 8),
+                          Builder(builder: (_) {
+                            final parsed = parseSpanishDueText(_actionDueTextController.text, now: DateTime.now());
+                            _parsedDueAt = parsed.dueAt; _parsedDueConfidence = parsed.confidence;
+                            return Text(parsed.dueAt == null ? 'No se pudo interpretar la fecha' : 'Fecha/hora interpretada: ${parsed.dueAt!.toLocal()}');
+                          }),
+                        ],
+                        if (_actionStep == 3) Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text('Revisión final', style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+                          const SizedBox(height: 8),
+                          Text('Título: ${_actionTitleController.text.trim()}'),
+                          Text('Descripción: ${_actionDescriptionController.text.trim()}'),
+                          Text(_parsedDueAt == null ? 'No se pudo interpretar la fecha' : 'Fecha/hora interpretada: ${_parsedDueAt!.toLocal()}'),
+                        ]))),
+                        const SizedBox(height: 12),
+                        Row(children: [
+                          if (_actionStep > 0) Expanded(child: OutlinedButton(onPressed: _isSaving || _isRecording ? null : () => setState(() => _actionStep--), child: const Text('Atrás'))),
+                          if (_actionStep > 0) const SizedBox(width: 12),
+                          if (_actionStep < 3) Expanded(child: FilledButton(onPressed: _isSaving || _isRecording ? null : () { _syncActionContent(); if (_actionStep == 2) _parseDueText(); setState(() => _actionStep++); }, child: const Text('Siguiente'))),
+                        ]),
                       ],
                       const SizedBox(height: 8),
                       CheckboxListTile(
@@ -510,10 +706,18 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                       ),
                       const SizedBox(height: 24),
                       FilledButton.icon(
-                        onPressed: _isSaving || _isRecording || _mode == null ? null : _saveNote,
+                        onPressed: _isSaving || _isRecording || _mode == null ? null : () => _saveNote(),
                         icon: _isSaving ? const SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.check_circle_outline),
-                        label: Text(_isSaving ? 'Guardando...' : (_isActionMode ? 'Guardar acción' : 'Guardar nota')),
+                        label: Text(_isSaving ? 'Guardando...' : (_isActionMode ? 'Guardar como nota en Nexus' : 'Guardar nota')),
                       ),
+                      if (_isActionMode) ...[
+                        const SizedBox(height: 12),
+                        FilledButton.icon(
+                          onPressed: _isSaving || _isRecording || _actionStep != 3 ? null : () => _createCalendarEvent(saveSummary: true),
+                          icon: const Icon(Icons.calendar_month_outlined),
+                          label: const Text('Crear en Calendar'),
+                        ),
+                      ],
                       const SizedBox(height: 12),
                       OutlinedButton.icon(
                         onPressed: _isSaving || _isRecording ? null : () => Navigator.pop(context),
