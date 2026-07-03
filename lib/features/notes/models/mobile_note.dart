@@ -28,7 +28,11 @@ class MobileNote {
     this.isActionCandidate = false,
     this.actionStatus,
     this.actionText,
+    this.actionTitle,
+    this.actionDescription,
     this.actionDueText,
+    this.parsedDueAt,
+    this.parsedDueConfidence,
     this.calendarEventCandidate = false,
     this.calendarCreated = false,
     this.calendarEventId,
@@ -61,7 +65,11 @@ class MobileNote {
   final bool isActionCandidate;
   final String? actionStatus;
   final String? actionText;
+  final String? actionTitle;
+  final String? actionDescription;
   final String? actionDueText;
+  final DateTime? parsedDueAt;
+  final double? parsedDueConfidence;
   final bool calendarEventCandidate;
   final bool calendarCreated;
   final String? calendarEventId;
@@ -99,7 +107,11 @@ class MobileNote {
       'is_action_candidate': isActionCandidate,
       'action_status': actionStatus,
       'action_text': actionText,
+      'action_title': actionTitle,
+      'action_description': actionDescription,
       'action_due_text': actionDueText,
+      'parsed_due_at': parsedDueAt?.toIso8601String(),
+      'parsed_due_confidence': parsedDueConfidence,
       'calendar_event_candidate': calendarEventCandidate,
       'calendar_created': calendarCreated,
       'calendar_event_id': calendarEventId,
@@ -144,8 +156,14 @@ class MobileNote {
           _readNullableString(map['actionStatus']),
       actionText: _readNullableString(map['action_text']) ??
           _readNullableString(map['actionText']),
+      actionTitle: _readNullableString(map['action_title']) ??
+          _readNullableString(map['actionTitle']),
+      actionDescription: _readNullableString(map['action_description']) ??
+          _readNullableString(map['actionDescription']),
       actionDueText: _readNullableString(map['action_due_text']) ??
           _readNullableString(map['actionDueText']),
+      parsedDueAt: _readDateTime(map['parsed_due_at'] ?? map['parsedDueAt']),
+      parsedDueConfidence: _readNullableDouble(map['parsed_due_confidence'] ?? map['parsedDueConfidence']),
       calendarEventCandidate: _readBool(map['calendar_event_candidate'] ?? map['calendarEventCandidate']),
       calendarCreated: _readBool(map['calendar_created'] ?? map['calendarCreated']),
       calendarEventId: _readNullableString(map['calendar_event_id']) ??
@@ -184,7 +202,11 @@ class MobileNote {
     bool? isActionCandidate,
     String? actionStatus,
     String? actionText,
+    String? actionTitle,
+    String? actionDescription,
     String? actionDueText,
+    DateTime? parsedDueAt,
+    double? parsedDueConfidence,
     bool? calendarEventCandidate,
     bool? calendarCreated,
     String? calendarEventId,
@@ -217,7 +239,11 @@ class MobileNote {
       isActionCandidate: isActionCandidate ?? this.isActionCandidate,
       actionStatus: actionStatus ?? this.actionStatus,
       actionText: actionText ?? this.actionText,
+      actionTitle: actionTitle ?? this.actionTitle,
+      actionDescription: actionDescription ?? this.actionDescription,
       actionDueText: actionDueText ?? this.actionDueText,
+      parsedDueAt: parsedDueAt ?? this.parsedDueAt,
+      parsedDueConfidence: parsedDueConfidence ?? this.parsedDueConfidence,
       calendarEventCandidate: calendarEventCandidate ?? this.calendarEventCandidate,
       calendarCreated: calendarCreated ?? this.calendarCreated,
       calendarEventId: calendarEventId ?? this.calendarEventId,
@@ -246,6 +272,12 @@ class MobileNote {
     if (value is int) return value;
     if (value is num) return value.toInt();
     return 0;
+  }
+
+  static double? _readNullableDouble(dynamic value) {
+    if (value is num) return value.toDouble();
+    if (value is String) return double.tryParse(value);
+    return null;
   }
 
   static bool _readBool(dynamic value) {
