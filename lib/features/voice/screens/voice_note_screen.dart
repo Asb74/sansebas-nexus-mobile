@@ -194,8 +194,10 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   int _assistantStep = 0;
   VoiceAssistantState _assistantState = VoiceAssistantState.askMode;
   String _currentPrompt = '';
+  String _statusMessage = '';
   String _lastDetectedAnswer = '';
   int _attemptCounter = 0;
+  int _speechRetryCount = 0;
   bool _returnToConfirmAfterEdit = false;
   bool _ttsAvailable = true;
   bool _isSaving = false;
@@ -211,6 +213,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   String _lastPartialSpeech = '';
   bool _manualStopRequested = false;
   bool _speechUnavailable = false;
+  bool _speechReady = false;
   Timer? _autoAdvanceTimer;
   Timer? _maxListeningTimer;
   String _dictationStateLabel = 'Finalizado';
@@ -222,7 +225,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     super.initState();
     _mastersFuture = _masterService.loadMasters();
     _draftMobileNoteId = _uuid.v4();
-    unawaited(_configureTts().then((_) => _startModeChoice()));
+    unawaited(_ensureSpeechInitialized().then((_) => _configureTts()).then((_) => _startModeChoice()));
   }
 
   @override
@@ -285,10 +288,14 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     }
   }
 
-  Future<void> _speak(String text) async {
+  Future<void> _speak(String text, {bool replacePrompt = true}) async {
     if (!mounted) return;
     setState(() {
-      _currentPrompt = text;
+      if (replacePrompt) {
+        _currentPrompt = text;
+        _statusMessage = '';
+        _speechRetryCount = 0;
+      }
       _status = _VoiceNoteStatus.speaking;
     });
     if (!_ttsAvailable) {
@@ -363,8 +370,10 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       _assistantStep = 0;
       _assistantState = VoiceAssistantState.askTitle;
       _currentPrompt = '';
+      _statusMessage = '';
       _lastDetectedAnswer = '';
       _attemptCounter = 0;
+      _speechRetryCount = 0;
       _returnToConfirmAfterEdit = false;
       _finalSpeechBuffer = '';
       _lastPartialSpeech = '';
@@ -427,6 +436,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
 
   Future<void> _retryCurrentQuestion({String message = 'No te he oído.'}) async {
     _attemptCounter++;
+    debugPrint('Asistente voz - retry question count=$_attemptCounter speechRetryCount=$_speechRetryCount state=$_assistantState step=$_assistantStep');
     _activeDictationController.clear();
     _finalSpeechBuffer = '';
     _lastPartialSpeech = '';
@@ -435,7 +445,9 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       if (mounted) setState(() => _status = _VoiceNoteStatus.ready);
       return;
     }
-    await _speak('$message ${_promptForStep()}.');
+    if (mounted) setState(() => _statusMessage = message);
+    await _speak('$message ${_promptForStep()}.', replacePrompt: false);
+    _speechRetryCount = 0;
     await _startRecordingAfterTts();
   }
 
@@ -468,12 +480,12 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
 
   Future<void> _finishStep({String reason = 'manual o final'}) async {
     final listened = _listeningStartedAt == null ? Duration.zero : DateTime.now().difference(_listeningStartedAt!);
-    debugPrint('Asistente voz - process response state=$_assistantState reason=$reason listened=${listened.inMilliseconds}ms minMet=${listened >= _listeningConfig.minimumListeningTime}');
+    debugPrint('Asistente voz - process response state=$_assistantState step=$_assistantStep reason=$reason listened=${listened.inMilliseconds}ms minMet=${listened >= _listeningConfig.minimumListeningTime}');
     if (_isRecording) await _stopRecording(markReview: false);
     _commitActiveController();
     final spokenText = _activeDictationController.text;
     final intent = detectVoiceCommand(spokenText);
-    debugPrint('Asistente voz - comando detectado=$intent textPresent=${spokenText.trim().isNotEmpty}');
+    debugPrint('Asistente voz - texto que se va a procesar="${spokenText.trim()}" comando detectado=$intent textPresent=${spokenText.trim().isNotEmpty}');
     setState(() => _lastDetectedAnswer = spokenText.trim());
     if (_looksInvalidSpeech(spokenText)) {
       await _retryCurrentQuestion(message: spokenText.trim().isEmpty ? 'No te he oído.' : 'No he entendido la respuesta.');
@@ -509,35 +521,59 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     }
   }
 
-  Future<void> _startRecording() async {
+  Future<bool> _ensureSpeechInitialized() async {
+    if (_speechReady) {
+      debugPrint('Dictado voz - speech initialized true (cached)');
+      return true;
+    }
     try {
-      _autoAdvanceTimer?.cancel();
-      _maxListeningTimer?.cancel();
-      final permissionGranted = await _audioRecorder.hasPermission();
-      debugPrint('Dictado voz - permission granted: $permissionGranted');
-      if (!permissionGranted) {
-        _showMessage('Permiso de micrófono denegado');
-        return;
-      }
-
       final available = await _speech.initialize(
         onStatus: _onSpeechStatus,
         onError: _onSpeechError,
         debugLogging: true,
       );
-      debugPrint('Dictado voz - speech available: $available');
+      _speechReady = available;
+      debugPrint('Dictado voz - speech initialized $_speechReady');
+      if (available) {
+        final locales = await _speech.locales();
+        debugPrint('Dictado voz - locales disponibles: ${locales.map((locale) => '${locale.localeId}:${locale.name}').join(', ')}');
+      }
+      return available;
+    } catch (error) {
+      _speechReady = false;
+      debugPrint('Dictado voz - speech initialized false error=$error');
+      return false;
+    }
+  }
+
+  Future<void> _startRecording() async {
+    try {
+      _autoAdvanceTimer?.cancel();
+      _maxListeningTimer?.cancel();
+      debugPrint('Asistente voz - start STT state=$_assistantState step=$_assistantStep attachAudio=$_attachOriginalAudio speechReady=$_speechReady');
+
+      final available = await _ensureSpeechInitialized();
       if (!available) {
+        _speechUnavailable = true;
         _showMessage('Reconocimiento de voz no disponible en este dispositivo');
+        if (mounted) setState(() => _status = _VoiceNoteStatus.ready);
         return;
       }
 
+      await _speech.stop();
+      if (_speech.isListening) await _speech.cancel();
+
       final localeId = await _preferredSpanishLocaleId();
-      debugPrint(
-        'Dictado voz - locale seleccionado: ${localeId ?? 'predeterminado del dispositivo'}',
-      );
+      debugPrint('Dictado voz - locale usado: ${localeId ?? 'predeterminado del dispositivo'}');
 
       String? path;
       if (_attachOriginalAudio) {
+        final permissionGranted = await _audioRecorder.hasPermission();
+        debugPrint('Dictado voz - audio recorder permission granted: $permissionGranted');
+        if (!permissionGranted) {
+          _showMessage('Permiso de micrófono denegado para adjuntar audio original');
+          return;
+        }
         final directory = await getTemporaryDirectory();
         path = '${directory.path}/${_uuid.v4()}.m4a';
         await _audioRecorder.start(
@@ -556,13 +592,14 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         _recordingDuration = Duration.zero;
         _audioPath = path;
         _audioDurationSeconds = null;
+        _dictationStateLabel = 'Escuchando...';
       });
 
       _manualStopRequested = false;
       _speechUnavailable = false;
       _primeSpeechBuffer();
       await _listenContinuously(localeId: localeId);
-      debugPrint('Asistente voz - listen start state=$_assistantState min=${_listeningConfig.minimumListeningTime.inMilliseconds}ms silence=${_listeningConfig.silenceAfterSpeech.inMilliseconds}ms max=${_listeningConfig.maxListeningTime.inMilliseconds}ms listening=${_speech.isListening}');
+      debugPrint('Asistente voz - listen start state=$_assistantState step=$_assistantStep min=${_listeningConfig.minimumListeningTime.inMilliseconds}ms silence=${_listeningConfig.silenceAfterSpeech.inMilliseconds}ms max=${_listeningConfig.maxListeningTime.inMilliseconds}ms listening=${_speech.isListening}');
       _scheduleMaxListeningTimeout();
 
       _durationTimer?.cancel();
@@ -585,12 +622,13 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     if (!mounted) return;
     debugPrint('Asistente voz - prep before listen state=$_assistantState');
     setState(() => _status = _VoiceNoteStatus.preparing);
-    await Future<void>.delayed(const Duration(milliseconds: 300));
+    await Future<void>.delayed(const Duration(milliseconds: 500));
     if (!mounted || _isSaving) return;
     await _startRecording();
   }
 
   Future<String?> _preferredSpanishLocaleId() async {
+    await _ensureSpeechInitialized();
     final locales = await _speech.locales();
     for (final preferred in const ['es_ES', 'es-ES']) {
       for (final locale in locales) {
@@ -698,7 +736,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     var recognized = result.recognizedWords.trim();
     if (recognized.isEmpty) return;
     _speechFirstDetectedAt ??= DateTime.now();
-    debugPrint('Asistente voz - texto ${result.finalResult ? 'final' : 'parcial'} state=$_assistantState length=${recognized.length}');
+    debugPrint("Asistente voz - onResult ${result.finalResult ? 'final' : 'parcial'} state=$_assistantState step=$_assistantStep texto=\"$recognized\" length=${recognized.length}");
     if (result.finalResult && result.confidence > 0 && result.confidence < .25) {
       _scheduleAutoAdvance(reason: 'confianza baja');
       return;
@@ -737,7 +775,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     final listened = _listeningStartedAt == null ? Duration.zero : DateTime.now().difference(_listeningStartedAt!);
     final minimumRemaining = config.minimumListeningTime - listened;
     final delay = minimumRemaining.isNegative ? config.silenceAfterSpeech : minimumRemaining;
-    debugPrint('Asistente voz - scheduling process reason=$reason delay=${delay.inMilliseconds}ms listened=${listened.inMilliseconds}ms minMet=${listened >= config.minimumListeningTime} voiceStarted=${_speechFirstDetectedAt != null}');
+    debugPrint('Asistente voz - scheduling process reason=$reason delay=${delay.inMilliseconds}ms listened=${listened.inMilliseconds}ms minMet=${listened >= config.minimumListeningTime} voiceStarted=${_speechFirstDetectedAt != null} texto="${_activeDictationController.text.trim()}"');
     _autoAdvanceTimer = Timer(delay, () {
       if (mounted && _isRecording && !_manualStopRequested) {
         setState(() => _dictationStateLabel = 'Procesando respuesta...');
@@ -746,42 +784,77 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     });
   }
 
+  Future<void> _retryListeningOnceOrRepeat(String reason) async {
+    if (!mounted || _manualStopRequested || _speechUnavailable) return;
+    final text = _activeDictationController.text.trim();
+    debugPrint('Asistente voz - retry decision reason=$reason retryCount=$_speechRetryCount state=$_assistantState step=$_assistantStep textPresent=${text.isNotEmpty}');
+    if (text.isNotEmpty) {
+      _scheduleAutoAdvance(reason: '$reason con texto');
+      return;
+    }
+    if (_speechRetryCount >= 1) {
+      await _retryCurrentQuestion(message: 'No te he oído.');
+      return;
+    }
+    _speechRetryCount++;
+    _autoAdvanceTimer?.cancel();
+    _maxListeningTimer?.cancel();
+    await _stopAudioRecorderIfNeeded();
+    await _speech.stop();
+    if (!mounted || _manualStopRequested) return;
+    setState(() {
+      _statusMessage = 'No te he oído. Reintentando...';
+      _status = _VoiceNoteStatus.preparing;
+      _dictationStateLabel = 'Reintentando escucha...';
+    });
+    debugPrint('Asistente voz - automatic STT retry count=$_speechRetryCount state=$_assistantState step=$_assistantStep');
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    if (mounted && !_manualStopRequested && !_isSaving) {
+      await _startRecording();
+    }
+  }
+
   void _onSpeechStatus(String status) {
     if (!mounted) return;
+    debugPrint('Dictado voz - onStatus=$status state=$_assistantState step=$_assistantStep retryCount=$_speechRetryCount');
+    if (status == 'listening') {
+      if (mounted) {
+        setState(() {
+          _status = _VoiceNoteStatus.listening;
+          _dictationStateLabel = 'Escuchando...';
+        });
+      }
+      return;
+    }
     if (status == 'notListening' || status == 'done') {
-      debugPrint('Dictado voz - listening false, estado speech_to_text: $status');
       if (_isRecording && !_manualStopRequested && !_speechUnavailable) {
         final text = _activeDictationController.text.trim();
-        if (text.isEmpty) {
-          final listened = _listeningStartedAt == null ? Duration.zero : DateTime.now().difference(_listeningStartedAt!);
-          if (listened < _listeningConfig.maxListeningTime) {
-            debugPrint('Asistente voz - STT ended without text before max; waiting maxListeningTime listened=${listened.inMilliseconds}ms');
-            return;
-          }
+        if (text.isNotEmpty) {
+          setState(() => _dictationStateLabel = 'Procesando respuesta...');
+          _scheduleAutoAdvance(reason: 'speech status $status');
+        } else {
+          unawaited(_retryListeningOnceOrRepeat('speech status $status sin texto'));
         }
-        setState(() => _dictationStateLabel = 'Procesando respuesta...');
-        _scheduleAutoAdvance(reason: 'speech status $status');
       }
-    } else if (status == 'listening') {
-      debugPrint('Dictado voz - listening true');
     }
   }
 
   void _onSpeechError(SpeechRecognitionError error) {
-    debugPrint(
-      'Dictado voz - errores del speech_to_text: ${error.errorMsg}, permanent: ${error.permanent}',
-    );
+    debugPrint('Dictado voz - onError=${error.errorMsg}, permanent=${error.permanent} state=$_assistantState step=$_assistantStep retryCount=$_speechRetryCount');
     if (!mounted) return;
     if (error.errorMsg == 'error_no_match' || error.errorMsg == 'error_speech_timeout') {
-      final listened = _listeningStartedAt == null ? Duration.zero : DateTime.now().difference(_listeningStartedAt!);
-      if (listened < _listeningConfig.maxListeningTime && _activeDictationController.text.trim().isEmpty) {
-        debugPrint('Asistente voz - speech error before max; waiting maxListeningTime listened=${listened.inMilliseconds}ms');
-        return;
-      }
-      unawaited(_finishStep(reason: 'speech error ${error.errorMsg}'));
-    } else if (error.permanent) {
+      unawaited(_retryListeningOnceOrRepeat('speech error ${error.errorMsg}'));
+      return;
+    }
+    if (error.permanent) {
       _speechUnavailable = true;
-      _showMessage('Reconocimiento de voz no disponible en este dispositivo');
+      _autoAdvanceTimer?.cancel();
+      _maxListeningTimer?.cancel();
+      setState(() {
+        _status = _VoiceNoteStatus.ready;
+        _statusMessage = 'Reconocimiento de voz no disponible. Puedes continuar manualmente.';
+      });
+      _showMessage('Reconocimiento de voz no disponible. Puedes continuar manualmente.');
     }
   }
 
@@ -1109,7 +1182,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                         },
                       ),
                       const SizedBox(height: 16),
-                      Text('Paso actual: ${_assistantState.name} · Pregunta actual: ${_currentPrompt.isEmpty ? (_mode == null ? '¿Quieres crear una nota o una acción?' : _promptForStep()) : _currentPrompt} · Respuesta detectada: ${_lastDetectedAnswer.isEmpty ? '—' : _lastDetectedAnswer} · Estado: ${_statusLabel()}', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
+                      Text('Paso actual: ${_assistantState.name} · Pregunta actual: ${_currentPrompt.isEmpty ? (_mode == null ? '¿Quieres crear una nota o una acción?' : _promptForStep()) : _currentPrompt} · ${_statusMessage.isEmpty ? '' : 'Aviso: $_statusMessage · '}Respuesta detectada: ${_lastDetectedAnswer.isEmpty ? '—' : _lastDetectedAnswer} · Estado: ${_statusLabel()}', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
                       const SizedBox(height: 8),
                       if (_mode != null) Text('Modo seleccionado: ${_isActionMode ? 'Acción' : 'Nota'}', style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
                       if (_mode != null) const SizedBox(height: 8),
@@ -1125,7 +1198,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                       Card(child: ListTile(
                         leading: Icon(_isRecording ? Icons.graphic_eq : Icons.info_outline, color: AppColors.primaryBlue),
                         title: Text(_statusLabel()),
-                        subtitle: Text('Pregunta: ${_currentPrompt.isEmpty ? _promptForStep() : _currentPrompt} · Respuesta detectada: ${_lastDetectedAnswer.isEmpty ? '—' : _lastDetectedAnswer} · Duración: ${_formatDuration(_recordingDuration)}${_hasRecordedAudio ? ' · Audio original listo' : ''}${_ttsAvailable ? '' : ' · TTS no disponible'}'),
+                        subtitle: Text('Pregunta: ${_currentPrompt.isEmpty ? _promptForStep() : _currentPrompt} · ${_statusMessage.isEmpty ? '' : 'Aviso: $_statusMessage · '}Respuesta detectada: ${_lastDetectedAnswer.isEmpty ? '—' : _lastDetectedAnswer} · Duración: ${_formatDuration(_recordingDuration)}${_hasRecordedAudio ? ' · Audio original listo' : ''}${_ttsAvailable ? '' : ' · TTS no disponible'}'),
                       )),
                       const SizedBox(height: 16),
                       NoteTextField(controller: _titleController, label: _isActionMode ? 'Título de la acción' : 'Título', hintText: _defaultTitle, textInputAction: TextInputAction.next),
