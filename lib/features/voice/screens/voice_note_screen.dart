@@ -209,6 +209,11 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   String _dictationStateLabel = 'Finalizado';
   DateTime? _parsedDueAt;
   double? _parsedDueConfidence;
+  int _speechSessionId = 0;
+  int? _activeSpeechSessionId;
+  bool _isTtsSpeaking = false;
+  bool _isListeningForUser = false;
+  bool _stepRunning = false;
 
   @override
   void initState() {
@@ -245,6 +250,22 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       await _tts.setSpeechRate(0.48);
       await _tts.setVolume(1);
       await _tts.awaitSpeakCompletion(true);
+      _tts.setStartHandler(() {
+        debugPrint('TTS_START handler');
+        _isTtsSpeaking = true;
+      });
+      _tts.setCompletionHandler(() {
+        debugPrint('TTS_END handler');
+        _isTtsSpeaking = false;
+      });
+      _tts.setCancelHandler(() {
+        debugPrint('TTS_CANCEL handler');
+        _isTtsSpeaking = false;
+      });
+      _tts.setErrorHandler((message) {
+        debugPrint('TTS_ERROR handler message=$message');
+        _isTtsSpeaking = false;
+      });
     } catch (error) {
       debugPrint('TTS no disponible: $error');
       if (mounted) setState(() => _ttsAvailable = false);
@@ -253,21 +274,29 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
 
   Future<void> _speak(String text, {bool replacePrompt = true}) async {
     if (!mounted) return;
+    _isTtsSpeaking = true;
+    _isListeningForUser = false;
+    _activeSpeechSessionId = null;
+    _stepRecognizedText = '';
+    await _speech.cancel();
+    await _speech.stop();
     setState(() {
       if (replacePrompt) _currentPrompt = text;
       _status = _VoiceNoteStatus.speaking;
     });
     try {
-      debugPrint('TTS START step=$_assistantStepState prompt="$text"');
-      await _tts.awaitSpeakCompletion(true);
+      debugPrint('TTS_START step=$_assistantStepState prompt="$text"');
       await _tts.stop();
+      await _tts.awaitSpeakCompletion(true);
       await _tts.speak(text);
-      debugPrint('TTS END step=$_assistantStepState');
+      debugPrint('TTS_END step=$_assistantStepState prompt="$text"');
     } catch (error) {
-      debugPrint('TTS ERROR step=$_assistantStepState error=$error');
+      debugPrint('TTS_ERROR step=$_assistantStepState error=$error');
       if (mounted) setState(() => _ttsAvailable = false);
       await Future<void>.delayed(const Duration(milliseconds: 700));
     } finally {
+      _isTtsSpeaking = false;
+      await Future<void>.delayed(const Duration(milliseconds: 600));
       if (mounted && _status == _VoiceNoteStatus.speaking) setState(() => _status = _VoiceNoteStatus.preparing);
     }
   }
@@ -354,21 +383,31 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
 
   Future<void> _runStep(VoiceAssistantStep step) async {
     if (!mounted || _isSaving || step == VoiceAssistantStep.finished) return;
-    final prompt = _promptForAssistantStep(step);
-    debugPrint('STEP START $step');
-    setState(() {
-      _assistantStepState = step;
-      _assistantStep = _stepNumberFor(step);
-      _currentPrompt = prompt;
-      _statusMessage = '';
-      _lastPartialSpeech = '';
-      _stepRecognizedText = '';
-      _confirmationCommandController.clear();
-      _status = _VoiceNoteStatus.preparing;
-    });
-    await _speak(prompt);
-    await Future<void>.delayed(const Duration(milliseconds: 400));
-    final text = await _listenForStep(step);
+    if (_stepRunning) {
+      debugPrint('STEP_SKIPPED already_running requested=$step current=$_assistantStepState');
+      return;
+    }
+    _stepRunning = true;
+    String? text;
+    try {
+      final prompt = _promptForAssistantStep(step);
+      debugPrint('STEP_START $step');
+      setState(() {
+        _assistantStepState = step;
+        _assistantStep = _stepNumberFor(step);
+        _currentPrompt = prompt;
+        _statusMessage = '';
+        _lastPartialSpeech = '';
+        _stepRecognizedText = '';
+        _lastDetectedAnswer = '';
+        _confirmationCommandController.clear();
+        _status = _VoiceNoteStatus.preparing;
+      });
+      await _speak(prompt);
+      text = await _listenForStep(step);
+    } finally {
+      _stepRunning = false;
+    }
     await _handleStepResult(step, text);
   }
 
@@ -379,9 +418,24 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       return null;
     }
 
+    if (_isTtsSpeaking) {
+      debugPrint('LISTEN_BLOCKED step=$step reason=tts_speaking');
+      return null;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    if (_isTtsSpeaking) {
+      debugPrint('LISTEN_BLOCKED step=$step reason=tts_speaking_after_delay');
+      return null;
+    }
+    await _speech.cancel();
     await _speech.stop();
+    _stepRecognizedText = '';
+    _lastDetectedAnswer = '';
+    final currentSessionId = ++_speechSessionId;
+    _activeSpeechSessionId = currentSessionId;
+    _isListeningForUser = true;
     final localeId = await _preferredSpanishLocaleId();
-    debugPrint('LISTEN START step=$step locale=${localeId ?? 'default'}');
+    debugPrint('LISTEN_START step=$step session=$currentSessionId locale=${localeId ?? 'default'}');
 
     String? path;
     if (_attachOriginalAudio) {
@@ -438,8 +492,12 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         _dictationStateLabel = 'Finalizado';
       });
     }
+    if (_activeSpeechSessionId == currentSessionId) _activeSpeechSessionId = null;
+    _isListeningForUser = false;
     _listenCompleter = null;
-    return result?.trim().isEmpty ?? true ? null : result!.trim();
+    final completedText = result?.trim().isEmpty ?? true ? null : result!.trim();
+    debugPrint('LISTEN_COMPLETE step=$step session=$currentSessionId text="${completedText ?? ''}"');
+    return completedText;
   }
 
   void _completeListen(String? text) {
@@ -450,15 +508,21 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   void _onSpeechResult(SpeechRecognitionResult result) {
     if (!mounted) return;
     final recognized = result.recognizedWords.trim();
-    debugPrint('ON RESULT ${result.finalResult ? 'final' : 'partial'} step=$_assistantStepState text="$recognized"');
+    debugPrint('LISTEN_RESULT raw final=${result.finalResult} step=$_assistantStepState session=$_activeSpeechSessionId text="$recognized"');
+    if (!_isListeningForUser || _activeSpeechSessionId == null || _isTtsSpeaking) return;
     if (recognized.isEmpty) return;
+    final isEcho = _looksLikeAssistantEcho(recognized);
+    debugPrint('LISTEN_RESULT ignored_echo=$isEcho step=$_assistantStepState text="$recognized"');
+    if (isEcho) return;
     _stepRecognizedText = recognized;
     _lastPartialSpeech = result.finalResult ? '' : recognized;
     setState(() {
       _lastDetectedAnswer = recognized;
-      _activeDictationController.text = recognized;
-      _activeDictationController.selection = TextSelection.collapsed(offset: recognized.length);
-      _commitActiveController();
+      if (_shouldWriteRecognizedTextToDataController(_assistantStepState)) {
+        _activeDictationController.text = recognized;
+        _activeDictationController.selection = TextSelection.collapsed(offset: recognized.length);
+        _commitActiveController();
+      }
     });
     if (result.finalResult) {
       unawaited(_speech.stop());
@@ -467,14 +531,18 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   }
 
   void _onSpeechStatus(String status) {
-    debugPrint('ON STATUS $status step=$_assistantStepState text="${_stepRecognizedText.trim()}"');
-    if (!mounted) return;
+    debugPrint('LISTEN_STATUS $status step=$_assistantStepState session=$_activeSpeechSessionId text="${_stepRecognizedText.trim()}"');
+    if (!mounted || !_isListeningForUser || _activeSpeechSessionId == null || _isTtsSpeaking) return;
     if (status == 'listening') setState(() => _status = _VoiceNoteStatus.listening);
-    if (status == 'notListening' || status == 'done') _completeListen(_stepRecognizedText.trim().isEmpty ? null : _stepRecognizedText.trim());
+    if (status == 'notListening' || status == 'done') {
+      final text = _stepRecognizedText.trim();
+      _completeListen(text.isEmpty ? null : text);
+    }
   }
 
   void _onSpeechError(SpeechRecognitionError error) {
-    debugPrint('ON ERROR ${error.errorMsg} permanent=${error.permanent} step=$_assistantStepState');
+    debugPrint('LISTEN_ERROR ${error.errorMsg} permanent=${error.permanent} step=$_assistantStepState session=$_activeSpeechSessionId');
+    if (!_isListeningForUser || _activeSpeechSessionId == null || _isTtsSpeaking) return;
     _completeListen(null);
   }
 
@@ -517,6 +585,37 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     if (await _audioRecorder.isRecording()) await _audioRecorder.stop();
   }
 
+
+  bool _shouldWriteRecognizedTextToDataController(VoiceAssistantStep step) => switch (step) {
+        VoiceAssistantStep.noteTitle ||
+        VoiceAssistantStep.noteContent ||
+        VoiceAssistantStep.actionTitle ||
+        VoiceAssistantStep.actionDescription ||
+        VoiceAssistantStep.actionDate => true,
+        VoiceAssistantStep.askMode || VoiceAssistantStep.noteConfirm || VoiceAssistantStep.actionConfirm || VoiceAssistantStep.finished => false,
+      };
+
+  bool _looksLikeAssistantEcho(String text) {
+    final normalized = _normalizeCommand(text);
+    if (normalized.isEmpty) return false;
+    final prompt = _normalizeCommand(_currentPrompt);
+    if (prompt.isNotEmpty && (normalized == prompt || normalized.contains(prompt) || prompt.contains(normalized))) return true;
+    const assistantPhrases = [
+      'no te he oido',
+      'repito',
+      'describe la accion',
+      'cuando quieres recordarlo',
+      'he entendido',
+      'di calendario guardar repetir',
+      'quieres crear una nota o una accion',
+      'titulo de la accion',
+      'titulo de la nota',
+      'que quieres anotar',
+      'guardar repetir cancelar',
+    ];
+    return assistantPhrases.any((phrase) => normalized == phrase || normalized.contains(phrase));
+  }
+
   TextEditingController get _activeDictationController => switch (_assistantStepState) {
         VoiceAssistantStep.askMode => _confirmationCommandController,
         VoiceAssistantStep.noteTitle => _titleController,
@@ -541,11 +640,13 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
 
   Future<void> _handleStepResult(VoiceAssistantStep step, String? text) async {
     final spoken = text?.trim() ?? '';
-    debugPrint('STEP RESULT step=$step text="$spoken"');
+    debugPrint('STEP_HANDLE step=$step text="$spoken"');
     if (mounted) setState(() => _lastDetectedAnswer = spoken);
-    if (spoken.isEmpty) {
+    if (spoken.isEmpty || _looksLikeAssistantEcho(spoken)) {
       if (mounted) setState(() => _statusMessage = 'No te he oído. Repito.');
       await _speak('No te he oído. Repito.', replacePrompt: false);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      debugPrint('NEXT_STEP $step');
       await _runStep(step);
       return;
     }
@@ -568,12 +669,14 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         }
       case VoiceAssistantStep.noteTitle:
         setState(() => _titleController.text = spoken);
-        debugPrint('NEXT STEP noteContent');
+        debugPrint('NEXT_STEP noteContent');
+        await Future<void>.delayed(const Duration(milliseconds: 300));
         await _runStep(VoiceAssistantStep.noteContent);
         return;
       case VoiceAssistantStep.noteContent:
         setState(() => _contentController.text = spoken);
-        debugPrint('NEXT STEP noteConfirm');
+        debugPrint('NEXT_STEP noteConfirm');
+        await Future<void>.delayed(const Duration(milliseconds: 300));
         await _runStep(VoiceAssistantStep.noteConfirm);
         return;
       case VoiceAssistantStep.noteConfirm:
@@ -581,18 +684,21 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         return;
       case VoiceAssistantStep.actionTitle:
         setState(() { _actionTitleController.text = spoken; _titleController.text = spoken; });
-        debugPrint('NEXT STEP actionDescription');
+        debugPrint('NEXT_STEP actionDescription');
+        await Future<void>.delayed(const Duration(milliseconds: 300));
         await _runStep(VoiceAssistantStep.actionDescription);
         return;
       case VoiceAssistantStep.actionDescription:
         setState(() { _actionDescriptionController.text = spoken; _contentController.text = spoken; });
-        debugPrint('NEXT STEP actionDate');
+        debugPrint('NEXT_STEP actionDate');
+        await Future<void>.delayed(const Duration(milliseconds: 300));
         await _runStep(VoiceAssistantStep.actionDate);
         return;
       case VoiceAssistantStep.actionDate:
         setState(() => _actionDueTextController.text = spoken);
         _parseDueText();
-        debugPrint('NEXT STEP actionConfirm');
+        debugPrint('NEXT_STEP actionConfirm');
+        await Future<void>.delayed(const Duration(milliseconds: 300));
         await _runStep(VoiceAssistantStep.actionConfirm);
         return;
       case VoiceAssistantStep.actionConfirm:
