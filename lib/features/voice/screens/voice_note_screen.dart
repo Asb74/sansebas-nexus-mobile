@@ -27,10 +27,11 @@ enum VoiceCaptureMode { note, action }
 
 enum VoiceAssistantMode { normal, handsFree }
 
-enum VoiceCommandIntent { save, cancel, repeat, calendar, note, action, unknown }
+enum VoiceCommandIntent { save, cancel, repeat, repeatTitle, repeatContent, repeatDate, calendar, note, action, unknown }
 
-enum _VoiceNoteStatus { choosing, ready, listening, transcribing, review, noVoice }
+enum VoiceAssistantState { askMode, askTitle, askContent, askDate, confirm, save, cancel, finished }
 
+enum _VoiceNoteStatus { choosing, ready, listening, transcribing, speaking, waiting, review, noVoice }
 
 String normalizeVoiceCommand(String text) {
   const accents = {'á':'a','à':'a','ä':'a','â':'a','é':'e','è':'e','ë':'e','ê':'e','í':'i','ì':'i','ï':'i','î':'i','ó':'o','ò':'o','ö':'o','ô':'o','ú':'u','ù':'u','ü':'u','û':'u'};
@@ -47,9 +48,12 @@ VoiceCommandIntent detectVoiceCommand(String text) {
   if (command.isEmpty) return VoiceCommandIntent.unknown;
   bool hasAny(Iterable<String> variants) => variants.any((variant) => command == variant || command.contains(variant));
   if (hasAny(const ['guardar en calendario', 'crear en calendario', 'crear evento', 'calendario', 'evento'])) return VoiceCommandIntent.calendar;
-  if (hasAny(const ['guardar nota', 'guardar accion', 'guardalo', 'guardar', 'guarda'])) return VoiceCommandIntent.save;
+  if (hasAny(const ['guardar nota', 'guardar accion', 'guardalo', 'guardar', 'guarda', 'si', 'sí'])) return VoiceCommandIntent.save;
+  if (hasAny(const ['repetir titulo', 'repite titulo', 'cambiar titulo'])) return VoiceCommandIntent.repeatTitle;
+  if (hasAny(const ['repetir contenido', 'repetir nota', 'repite contenido', 'cambiar contenido'])) return VoiceCommandIntent.repeatContent;
+  if (hasAny(const ['repetir fecha', 'repetir hora', 'repetir recordatorio', 'cambiar fecha', 'cambiar hora'])) return VoiceCommandIntent.repeatDate;
   if (hasAny(const ['empezar de nuevo', 'repetir todo', 'repetir', 'repite'])) return VoiceCommandIntent.repeat;
-  if (hasAny(const ['cancelar', 'cancela', 'salir', 'descartar'])) return VoiceCommandIntent.cancel;
+  if (hasAny(const ['cancelar', 'cancela', 'salir', 'descartar', 'no'])) return VoiceCommandIntent.cancel;
   if (hasAny(const ['crear nota', 'nota'])) return VoiceCommandIntent.note;
   if (hasAny(const ['accion', 'tarea', 'recordatorio'])) return VoiceCommandIntent.action;
   return VoiceCommandIntent.unknown;
@@ -174,7 +178,11 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   VoiceCaptureMode? _mode;
   VoiceAssistantMode _assistantMode = VoiceAssistantMode.normal;
   int _assistantStep = 0;
+  VoiceAssistantState _assistantState = VoiceAssistantState.askMode;
   String _currentPrompt = '';
+  String _lastDetectedAnswer = '';
+  int _attemptCounter = 0;
+  bool _returnToConfirmAfterEdit = false;
   bool _ttsAvailable = true;
   bool _isSaving = false;
   bool _attachOriginalAudio = false;
@@ -237,20 +245,43 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
 
   Future<void> _speak(String text) async {
     if (!mounted) return;
-    setState(() => _currentPrompt = text);
-    if (!_ttsAvailable) return;
+    setState(() {
+      _currentPrompt = text;
+      _status = _VoiceNoteStatus.speaking;
+    });
+    if (!_ttsAvailable) {
+      setState(() => _status = _VoiceNoteStatus.waiting);
+      return;
+    }
     try {
       await _tts.stop();
       await _tts.speak(text);
     } catch (error) {
       debugPrint('No se pudo reproducir prompt TTS: $error');
       if (mounted) setState(() => _ttsAvailable = false);
+    } finally {
+      if (mounted && _status == _VoiceNoteStatus.speaking) {
+        setState(() => _status = _VoiceNoteStatus.waiting);
+      }
     }
   }
 
   String _formatDue(DateTime dueAt) => '${dueAt.day.toString().padLeft(2, '0')}/${dueAt.month.toString().padLeft(2, '0')}/${dueAt.year} ${dueAt.hour.toString().padLeft(2, '0')}:${dueAt.minute.toString().padLeft(2, '0')}';
 
+  VoiceAssistantState _stateForStep() {
+    if (_mode == null) return VoiceAssistantState.askMode;
+    if (_assistantStep == 0) return VoiceAssistantState.askTitle;
+    if (_assistantStep == 1) return VoiceAssistantState.askContent;
+    if (_isActionMode && _assistantStep == 2) return VoiceAssistantState.askDate;
+    return VoiceAssistantState.confirm;
+  }
+
+  void _syncStateFromStep() {
+    _assistantState = _stateForStep();
+  }
+
   String _promptForStep() {
+    _syncStateFromStep();
     if (_mode == null) return '¿Quieres crear una nota o una acción?';
     if (!_isActionMode) {
       return switch (_assistantStep) {
@@ -286,7 +317,11 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       _selectedTopic = null;
       _selectedType = null;
       _assistantStep = 0;
+      _assistantState = VoiceAssistantState.askTitle;
       _currentPrompt = '';
+      _lastDetectedAnswer = '';
+      _attemptCounter = 0;
+      _returnToConfirmAfterEdit = false;
       _finalSpeechBuffer = '';
       _lastPartialSpeech = '';
       _titleController.clear();
@@ -332,25 +367,98 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     if (!_isRecording) await _startRecording();
   }
 
+  bool _isCommandOnly(String text) {
+    final normalized = normalizeVoiceCommand(text);
+    const commands = {'guardar', 'guarda', 'guardalo', 'cancelar', 'cancela', 'repetir', 'repite', 'repetir todo', 'si', 'no'};
+    return commands.contains(normalized);
+  }
+
+  bool _looksInvalidSpeech(String text) {
+    final normalized = normalizeVoiceCommand(text);
+    if (normalized.isEmpty) return true;
+    if (!_isConfirmationStep && _isCommandOnly(normalized)) return true;
+    final words = normalized.split(' ').where((word) => word.isNotEmpty).toList();
+    return words.length == 1 && words.single.length <= 2;
+  }
+
+  Future<void> _retryCurrentQuestion({String message = 'No te he oído.'}) async {
+    _attemptCounter++;
+    _activeDictationController.clear();
+    _finalSpeechBuffer = '';
+    _lastPartialSpeech = '';
+    if (_attemptCounter >= 3) {
+      await _speak('He tenido problemas para entenderte. ¿Quieres continuar manualmente?');
+      if (mounted) setState(() => _status = _VoiceNoteStatus.ready);
+      return;
+    }
+    await _speak('$message ${_promptForStep()}.');
+    await _startRecording();
+  }
+
+  String _monthName(int month) => const [
+        'enero',
+        'febrero',
+        'marzo',
+        'abril',
+        'mayo',
+        'junio',
+        'julio',
+        'agosto',
+        'septiembre',
+        'octubre',
+        'noviembre',
+        'diciembre',
+      ][month - 1];
+
+  String _confirmationSummary() {
+    if (!_isActionMode) {
+      return 'He entendido: Título: ${_titleController.text.trim()}. Contenido: ${_contentController.text.trim()}. ¿Quieres guardar, repetir o cancelar?';
+    }
+    _parseDueText();
+    final dueAt = _parsedDueAt;
+    final interpreted = dueAt == null
+        ? 'No he podido interpretar una fecha exacta.'
+        : 'Se guardará el día ${dueAt.day} de ${_monthName(dueAt.month)} a las ${dueAt.hour.toString().padLeft(2, '0')}:${dueAt.minute.toString().padLeft(2, '0')}.';
+    return 'He entendido: Título: ${_actionTitleController.text.trim()}. Acción: ${_actionDescriptionController.text.trim()}. Fecha: ${_actionDueTextController.text.trim()}. $interpreted ¿Quieres guardar, repetir o cancelar?';
+  }
+
   Future<void> _finishStep() async {
     if (_isRecording) await _stopRecording(markReview: false);
     _commitActiveController();
     final spokenText = _activeDictationController.text;
     final intent = detectVoiceCommand(spokenText);
+    setState(() => _lastDetectedAnswer = spokenText.trim());
+    if (_looksInvalidSpeech(spokenText)) {
+      await _retryCurrentQuestion(message: spokenText.trim().isEmpty ? 'No te he oído.' : 'No he entendido la respuesta.');
+      return;
+    }
     if (_mode == null) {
       if (intent == VoiceCommandIntent.note) { _selectMode(VoiceCaptureMode.note, autoStart: true); return; }
       if (intent == VoiceCommandIntent.action) { _selectMode(VoiceCaptureMode.action, autoStart: true); return; }
-      await _speak('No he entendido. Di nota o acción.');
-      await _startRecording();
+      await _retryCurrentQuestion(message: 'No he entendido la respuesta.');
       return;
     }
     if (_isConfirmationStep && await _handleVoiceCommand(intent)) return;
-    if (_assistantStep < _lastAssistantStep) {
-      setState(() => _assistantStep++);
-      await _speak(_promptForStep());
+    if (_returnToConfirmAfterEdit) {
+      setState(() {
+        _assistantStep = _lastAssistantStep;
+        _attemptCounter = 0;
+        _returnToConfirmAfterEdit = false;
+        _syncStateFromStep();
+      });
+      await _speak(_confirmationSummary());
+      await _startRecording();
+    } else if (_assistantStep < _lastAssistantStep) {
+      setState(() {
+        _assistantStep++;
+        _attemptCounter = 0;
+        _syncStateFromStep();
+      });
+      await _speak(_isConfirmationStep ? _confirmationSummary() : _promptForStep());
       await _startRecording();
     } else {
-      await _speak(_promptForStep());
+      await _speak(_confirmationSummary());
+      await _startRecording();
     }
   }
 
@@ -497,8 +605,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       onResult: _onSpeechResult,
       listenMode: ListenMode.dictation,
       partialResults: true,
-      listenFor: const Duration(minutes: 10),
-      pauseFor: const Duration(seconds: 12),
+      listenFor: const Duration(seconds: 20),
+      pauseFor: const Duration(milliseconds: 900),
       localeId: localeId,
     );
   }
@@ -507,6 +615,10 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     if (!mounted) return;
     var recognized = result.recognizedWords.trim();
     if (recognized.isEmpty) return;
+    if (result.finalResult && result.confidence > 0 && result.confidence < .25) {
+      unawaited(_retryCurrentQuestion(message: 'No he entendido la respuesta.'));
+      return;
+    }
     final finishDictation = _mode != null && !_isConfirmationStep && normalizeVoiceCommand(recognized).split(' ').contains('finalizar');
     if (finishDictation) {
       recognized = recognized.replaceAll(RegExp(r'\bfinalizar\b', caseSensitive: false), '').trim();
@@ -537,7 +649,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
 
   void _scheduleAutoAdvance() {
     _autoAdvanceTimer?.cancel();
-    _autoAdvanceTimer = Timer(const Duration(milliseconds: 900), () {
+    _autoAdvanceTimer = Timer(const Duration(milliseconds: 150), () {
       if (mounted && _isRecording && !_manualStopRequested) unawaited(_finishStep());
     });
   }
@@ -547,7 +659,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     if (status == 'notListening' || status == 'done') {
       debugPrint('Dictado voz - listening false, estado speech_to_text: $status');
       if (_isRecording && !_manualStopRequested && !_speechUnavailable) {
-        setState(() => _dictationStateLabel = 'Pausa detectada. Pulsa Continuar dictando o Finalizar paso.');
+        setState(() => _dictationStateLabel = 'Procesando...');
+        unawaited(_finishStep());
       }
     } else if (status == 'listening') {
       debugPrint('Dictado voz - listening true');
@@ -560,7 +673,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     );
     if (!mounted) return;
     if (error.errorMsg == 'error_no_match' || error.errorMsg == 'error_speech_timeout') {
-      _showMessage('No se detectó voz');
+      unawaited(_retryCurrentQuestion(message: 'No te he oído.'));
     } else if (error.permanent) {
       _speechUnavailable = true;
       _showMessage('Reconocimiento de voz no disponible en este dispositivo');
@@ -588,6 +701,18 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       await _startRecording();
       return true;
     }
+    if (intent == VoiceCommandIntent.repeatTitle) {
+      await _repeatSpecificStep(0);
+      return true;
+    }
+    if (intent == VoiceCommandIntent.repeatContent) {
+      await _repeatSpecificStep(1);
+      return true;
+    }
+    if (_isActionMode && intent == VoiceCommandIntent.repeatDate) {
+      await _repeatSpecificStep(2);
+      return true;
+    }
     if (_isActionMode && intent == VoiceCommandIntent.calendar) {
       if (_parsedDueAt == null) {
         await _speak('No he entendido la fecha. Dime cuándo quieres recordarlo.');
@@ -606,9 +731,35 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     return false;
   }
 
+  Future<void> _repeatSpecificStep(int step) async {
+    setState(() {
+      _assistantStep = step;
+      _attemptCounter = 0;
+      _returnToConfirmAfterEdit = true;
+      _confirmationCommandController.clear();
+      if (step == 0) {
+        _titleController.clear();
+        _actionTitleController.clear();
+      } else if (step == 1) {
+        _contentController.clear();
+        _actionDescriptionController.clear();
+      } else if (step == 2) {
+        _actionDueTextController.clear();
+        _parsedDueAt = null;
+        _parsedDueConfidence = null;
+      }
+      _syncStateFromStep();
+    });
+    await _speak(_promptForStep());
+    await _startRecording();
+  }
+
   void _resetCurrentFlow() {
     setState(() {
       _assistantStep = 0;
+      _assistantState = VoiceAssistantState.askTitle;
+      _attemptCounter = 0;
+      _returnToConfirmAfterEdit = false;
       _titleController.clear();
       _contentController.clear();
       _actionTitleController.clear();
@@ -791,7 +942,9 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         _VoiceNoteStatus.choosing => 'Elige qué quieres crear',
         _VoiceNoteStatus.ready => 'Preparado',
         _VoiceNoteStatus.listening => _dictationStateLabel,
-        _VoiceNoteStatus.transcribing => 'Transcribiendo...',
+        _VoiceNoteStatus.transcribing => 'Procesando',
+        _VoiceNoteStatus.speaking => 'Hablando',
+        _VoiceNoteStatus.waiting => 'Esperando respuesta',
         _VoiceNoteStatus.review => 'Listo para revisar',
         _VoiceNoteStatus.noVoice => 'No se detectó voz',
       };
@@ -850,7 +1003,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                         },
                       ),
                       const SizedBox(height: 16),
-                      Text('Paso actual: ${_mode == null ? 'Selección de modo' : (_assistantStep + 1).toString()} · Pregunta actual: ${_currentPrompt.isEmpty ? (_mode == null ? '¿Quieres crear una nota o una acción?' : _promptForStep()) : _currentPrompt}', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
+                      Text('Paso actual: ${_assistantState.name} · Pregunta actual: ${_currentPrompt.isEmpty ? (_mode == null ? '¿Quieres crear una nota o una acción?' : _promptForStep()) : _currentPrompt} · Respuesta detectada: ${_lastDetectedAnswer.isEmpty ? '—' : _lastDetectedAnswer} · Estado: ${_statusLabel()}', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
                       const SizedBox(height: 8),
                       if (_mode != null) Text('Modo seleccionado: ${_isActionMode ? 'Acción' : 'Nota'}', style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
                       if (_mode != null) const SizedBox(height: 8),
@@ -866,7 +1019,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                       Card(child: ListTile(
                         leading: Icon(_isRecording ? Icons.graphic_eq : Icons.info_outline, color: AppColors.primaryBlue),
                         title: Text(_statusLabel()),
-                        subtitle: Text('Pregunta: ${_currentPrompt.isEmpty ? _promptForStep() : _currentPrompt} · Duración: ${_formatDuration(_recordingDuration)}${_hasRecordedAudio ? ' · Audio original listo' : ''}${_ttsAvailable ? '' : ' · TTS no disponible'}'),
+                        subtitle: Text('Pregunta: ${_currentPrompt.isEmpty ? _promptForStep() : _currentPrompt} · Respuesta detectada: ${_lastDetectedAnswer.isEmpty ? '—' : _lastDetectedAnswer} · Duración: ${_formatDuration(_recordingDuration)}${_hasRecordedAudio ? ' · Audio original listo' : ''}${_ttsAvailable ? '' : ' · TTS no disponible'}'),
                       )),
                       const SizedBox(height: 16),
                       NoteTextField(controller: _titleController, label: _isActionMode ? 'Título de la acción' : 'Título', hintText: _defaultTitle, textInputAction: TextInputAction.next),
