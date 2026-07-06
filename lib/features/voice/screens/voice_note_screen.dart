@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:android_intent_plus/android_intent.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:speech_to_text/speech_recognition_error.dart';
@@ -23,6 +24,8 @@ import '../../notes/services/firebase_sync_service.dart';
 import '../../notes/widgets/note_text_field.dart';
 
 enum VoiceCaptureMode { note, action }
+
+enum VoiceAssistantMode { normal, handsFree }
 
 enum _VoiceNoteStatus { choosing, ready, listening, transcribing, review, noVoice }
 
@@ -107,10 +110,12 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   final _actionTitleController = TextEditingController();
   final _actionDescriptionController = TextEditingController();
   final _actionDueTextController = TextEditingController();
+  final _confirmationCommandController = TextEditingController();
   final _masterService = MasterService();
   final _firebaseSyncService = FirebaseSyncService();
   final _attachmentService = AttachmentService();
   final _speech = SpeechToText();
+  final _tts = FlutterTts();
   final _audioRecorder = AudioRecorder();
   final _uuid = const Uuid();
 
@@ -121,10 +126,12 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   NoteTypeMaster? _selectedType;
   _VoiceNoteStatus _status = _VoiceNoteStatus.choosing;
   VoiceCaptureMode? _mode;
+  VoiceAssistantMode _assistantMode = VoiceAssistantMode.normal;
+  int _assistantStep = 0;
+  String _currentPrompt = '';
+  bool _ttsAvailable = true;
   bool _isSaving = false;
   bool _attachOriginalAudio = false;
-  bool _titleWasEdited = false;
-  bool _updatingSuggestedTitle = false;
   DateTime? _recordingStartedAt;
   Duration _recordingDuration = Duration.zero;
   Timer? _durationTimer;
@@ -135,7 +142,6 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   bool _manualStopRequested = false;
   bool _speechUnavailable = false;
   String _dictationStateLabel = 'Finalizado';
-  int _actionStep = 0;
   DateTime? _parsedDueAt;
   double? _parsedDueConfidence;
 
@@ -144,9 +150,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     super.initState();
     _mastersFuture = _masterService.loadMasters();
     _draftMobileNoteId = _uuid.v4();
-    _titleController.addListener(() {
-      if (!_updatingSuggestedTitle) _titleWasEdited = true;
-    });
+    unawaited(_configureTts());
   }
 
   @override
@@ -154,38 +158,126 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     _durationTimer?.cancel();
     _speech.cancel();
     _audioRecorder.dispose();
+    _tts.stop();
     _titleController.dispose();
     _contentController.dispose();
     _actionTitleController.dispose();
     _actionDescriptionController.dispose();
     _actionDueTextController.dispose();
+    _confirmationCommandController.dispose();
     super.dispose();
   }
 
   bool get _isRecording => _status == _VoiceNoteStatus.listening;
   bool get _isActionMode => _mode == VoiceCaptureMode.action;
   String get _defaultTitle => _isActionMode ? 'Acción de voz' : 'Nota de voz';
-  String get _contentLabel => _isActionMode ? 'Texto de acción' : 'Transcripción';
+  String get _contentLabel => _isActionMode ? 'Descripción' : 'Contenido / transcripción';
+  int get _lastAssistantStep => _isActionMode ? 3 : 2;
+  bool get _isConfirmationStep => _assistantStep == _lastAssistantStep;
+
+  Future<void> _configureTts() async {
+    try {
+      await _tts.setLanguage('es-ES');
+      await _tts.setSpeechRate(0.48);
+      await _tts.setVolume(1);
+      await _tts.awaitSpeakCompletion(true);
+    } catch (error) {
+      debugPrint('TTS no disponible: $error');
+      if (mounted) setState(() => _ttsAvailable = false);
+    }
+  }
+
+  Future<void> _speak(String text) async {
+    if (!mounted) return;
+    setState(() => _currentPrompt = text);
+    if (!_ttsAvailable) return;
+    try {
+      await _tts.stop();
+      await _tts.speak(text);
+    } catch (error) {
+      debugPrint('No se pudo reproducir prompt TTS: $error');
+      if (mounted) setState(() => _ttsAvailable = false);
+    }
+  }
+
+  String _promptForStep() {
+    if (!_isActionMode) {
+      return switch (_assistantStep) {
+        0 => 'Título de la nota',
+        1 => '¿Qué quieres anotar?',
+        _ => 'Nota lista. ¿Quieres guardar, repetir o cancelar?',
+      };
+    }
+    return switch (_assistantStep) {
+      0 => 'Título de la acción',
+      1 => 'Describe la acción',
+      2 => '¿Cuándo quieres recordarlo?',
+      _ => 'Acción lista. ¿Quieres crearla en calendario, guardarla en Nexus, repetir o cancelar?',
+    };
+  }
 
   void _selectMode(VoiceCaptureMode mode) {
     if (_isSaving || _isRecording) return;
     setState(() {
       _mode = mode;
       _status = _VoiceNoteStatus.ready;
+      _selectedArea = null;
+      _selectedTopic = null;
       _selectedType = null;
-      _titleWasEdited = false;
-      _titleController.text = mode == VoiceCaptureMode.action ? 'Acción de voz' : 'Nota de voz';
+      _assistantStep = 0;
+      _currentPrompt = '';
+      _finalSpeechBuffer = '';
+      _lastPartialSpeech = '';
+      _titleController.clear();
+      _contentController.clear();
+      _actionTitleController.clear();
+      _actionDescriptionController.clear();
+      _actionDueTextController.clear();
+      _confirmationCommandController.clear();
+      _parsedDueAt = null;
+      _parsedDueConfidence = null;
     });
-    _suggestTitleIfNeeded();
   }
   bool get _hasRecordedAudio => _audioPath != null;
 
-  Future<void> _toggleRecording() async {
-    if (_isSaving) return;
-    if (_isRecording) {
-      await _stopRecording();
-    } else {
+  Future<void> _startAssistant() async {
+    if (_mode == null || _isSaving) return;
+    setState(() => _status = _VoiceNoteStatus.ready);
+    await _speak(_promptForStep());
+    await _startRecording();
+  }
+
+  Future<void> _repeatStep() async {
+    if (_mode == null || _isSaving) return;
+    if (_isRecording) await _stopRecording(markReview: false);
+    _activeDictationController.clear();
+    _commitActiveController();
+    await _speak(_promptForStep());
+    await _startRecording();
+  }
+
+  Future<void> _continueDictating() async {
+    if (_mode == null || _isSaving) return;
+    if (_isRecording && !_speech.isListening) {
+      _manualStopRequested = false;
+      await _listenContinuously(localeId: await _preferredSpanishLocaleId());
+      if (mounted) setState(() => _dictationStateLabel = 'Escuchando...');
+      return;
+    }
+    if (!_isRecording) await _startRecording();
+  }
+
+  Future<void> _finishStep() async {
+    if (_isRecording) await _stopRecording(markReview: false);
+    _commitActiveController();
+    final command = _normalizedCommand(_activeDictationController.text);
+    if (_isConfirmationStep && await _handleVoiceCommand(command)) return;
+    if (_assistantStep < _lastAssistantStep) {
+      setState(() => _assistantStep++);
+      await _speak(_promptForStep());
       await _startRecording();
+    } else {
+      await _speak(_promptForStep());
     }
   }
 
@@ -274,7 +366,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     }
   }
 
-  Future<void> _stopRecording() async {
+  Future<void> _stopRecording({bool markReview = true}) async {
     setState(() => _status = _VoiceNoteStatus.transcribing);
     _durationTimer?.cancel();
     final startedAt = _recordingStartedAt;
@@ -286,20 +378,14 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
           : _audioPath;
       if (!mounted) return;
       setState(() {
-        _status = _contentController.text.trim().isEmpty
-            ? _VoiceNoteStatus.noVoice
-            : _VoiceNoteStatus.review;
+        _status = markReview ? _VoiceNoteStatus.review : _VoiceNoteStatus.ready;
         _audioPath = stoppedPath ?? _audioPath;
         _audioDurationSeconds = startedAt == null ? null : DateTime.now().difference(startedAt).inSeconds;
         _recordingStartedAt = null;
         _dictationStateLabel = 'Finalizado';
       });
-      _suggestTitleIfNeeded();
-      if (_contentController.text.trim().isEmpty) {
-        _showMessage('No se detectó voz');
-      } else {
-        _showMessage('Transcripción lista para revisar');
-      }
+      _commitActiveController();
+      _showMessage(markReview ? 'Texto listo para revisar' : 'Paso finalizado');
     } catch (error) {
       debugPrint('No se pudo detener dictado. Error exacto: $error');
       if (!mounted) return;
@@ -309,12 +395,19 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   }
 
   TextEditingController get _activeDictationController {
-    if (!_isActionMode) return _contentController;
-    return switch (_actionStep) {
+    if (!_isActionMode) {
+      return switch (_assistantStep) {
+        0 => _titleController,
+        1 => _contentController,
+        _ => _confirmationCommandController,
+      };
+    }
+    return switch (_assistantStep) {
       0 => _actionTitleController,
       1 => _actionDescriptionController,
       2 => _actionDueTextController,
-      _ => _actionDescriptionController,
+      3 => _confirmationCommandController,
+      _ => _confirmationCommandController,
     };
   }
 
@@ -336,19 +429,6 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     );
   }
 
-  Future<void> _restartSpeechAfterPause() async {
-    if (!_isRecording || _manualStopRequested || _speechUnavailable || _speech.isListening) return;
-    setState(() => _dictationStateLabel = 'Pausa detectada, continuando...');
-    await Future<void>.delayed(const Duration(milliseconds: 450));
-    if (!_isRecording || _manualStopRequested || _speechUnavailable) return;
-    try {
-      await _listenContinuously(localeId: await _preferredSpanishLocaleId());
-      if (mounted) setState(() => _dictationStateLabel = 'Escuchando...');
-    } catch (error) {
-      debugPrint('No se pudo reanudar dictado continuo: $error');
-    }
-  }
-
   void _onSpeechResult(SpeechRecognitionResult result) {
     if (!mounted) return;
     final recognized = result.recognizedWords.trim();
@@ -365,12 +445,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     final controller = _activeDictationController;
     controller.text = merged;
     controller.selection = TextSelection.collapsed(offset: controller.text.length);
-    if (_isActionMode) {
-      _syncActionContent();
-      if (_actionStep == 2) _parseDueText();
-    } else {
-      _suggestTitleIfNeeded();
-    }
+    _commitActiveController();
   }
 
   void _onSpeechStatus(String status) {
@@ -378,7 +453,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     if (status == 'notListening' || status == 'done') {
       debugPrint('Dictado voz - listening false, estado speech_to_text: $status');
       if (_isRecording && !_manualStopRequested && !_speechUnavailable) {
-        Future.microtask(_restartSpeechAfterPause);
+        setState(() => _dictationStateLabel = 'Pausa detectada. Pulsa Continuar dictando o Finalizar paso.');
       }
     } else if (status == 'listening') {
       debugPrint('Dictado voz - listening true');
@@ -398,20 +473,69 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     }
   }
 
-  void _suggestTitleIfNeeded() {
-    if (_titleWasEdited && _titleController.text.trim() != _defaultTitle) return;
-    final suggested = buildSuggestedTitle(_contentController.text, fallback: _defaultTitle);
-    _updatingSuggestedTitle = true;
-    _titleWasEdited = false;
-    _titleController.text = suggested;
-    _titleController.selection = TextSelection.collapsed(offset: _titleController.text.length);
-    _updatingSuggestedTitle = false;
+  void _commitActiveController() {
+    if (_isActionMode) {
+      _syncActionContent();
+      if (_assistantStep == 2) _parseDueText();
+    }
+  }
+
+  String _normalizedCommand(String text) {
+    return text.toLowerCase()
+        .replaceAll('á', 'a')
+        .replaceAll('é', 'e')
+        .replaceAll('í', 'i')
+        .replaceAll('ó', 'o')
+        .replaceAll('ú', 'u')
+        .replaceAll('ü', 'u')
+        .replaceAll(RegExp(r'[^a-zñ ]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  Future<bool> _handleVoiceCommand(String command) async {
+    if (command.contains('cancelar')) {
+      if (mounted) Navigator.pop(context);
+      return true;
+    }
+    if (command.contains('repetir titulo')) {
+      setState(() => _assistantStep = 0);
+      await _repeatStep();
+      return true;
+    }
+    if (command.contains('repetir contenido') && !_isActionMode) {
+      setState(() => _assistantStep = 1);
+      await _repeatStep();
+      return true;
+    }
+    if (command.contains('repetir descripcion') && _isActionMode) {
+      setState(() => _assistantStep = 1);
+      await _repeatStep();
+      return true;
+    }
+    if (command.contains('repetir fecha') && _isActionMode) {
+      setState(() => _assistantStep = 2);
+      await _repeatStep();
+      return true;
+    }
+    if (command == 'repetir' || command.contains(' repetir ')) {
+      await _repeatStep();
+      return true;
+    }
+    if (_isActionMode && command.contains('calendario')) {
+      await _createCalendarEvent(saveSummary: true);
+      return true;
+    }
+    if (command.contains('guardar')) {
+      await _saveNote();
+      return true;
+    }
+    return false;
   }
 
   void _syncActionContent() {
-    _contentController.text = [_actionTitleController.text.trim(), _actionDescriptionController.text.trim()]
-        .where((part) => part.isNotEmpty)
-        .join('\n\n');
+    _titleController.text = _actionTitleController.text;
+    _contentController.text = _actionDescriptionController.text;
   }
 
   void _parseDueText() {
@@ -430,9 +554,13 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     return masters.topics.where((topic) => topic.name.trim().toLowerCase() == 'general').toList(growable: false);
   }
 
-  T? _findDefault<T>(List<T> items, String name, String Function(T item) label) {
+  T? _findDefault<T>(List<T> items, String preferred, String Function(T item) label) {
+    final normalizedPreferred = _normalizedCommand(preferred);
     for (final item in items) {
-      if (label(item).trim().toLowerCase() == name) return item;
+      if (_normalizedCommand(label(item)) == normalizedPreferred) return item;
+    }
+    for (final item in items) {
+      if (_normalizedCommand(label(item)) == 'general') return item;
     }
     return items.firstOrNull;
   }
@@ -482,7 +610,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         typeId: type.id,
         type: type.name,
         tags: const [],
-        content: _isActionMode ? [_actionTitleController.text.trim(), _actionDescriptionController.text.trim()].where((p) => p.isNotEmpty).join('\n\n') : content,
+        content: _isActionMode ? _actionDescriptionController.text.trim() : content,
         source: _isActionMode ? 'voice_action' : 'voice_dictation',
         createdAt: now,
         updatedAt: now,
@@ -490,11 +618,11 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         userId: uid,
         deviceId: await _firebaseSyncService.readDeviceId(),
         attachmentsCount: attachments.length,
-        voiceTranscription: _isActionMode ? [_actionTitleController.text.trim(), _actionDescriptionController.text.trim(), _actionDueTextController.text.trim()].where((p) => p.isNotEmpty).join('\n\n') : content,
+        voiceTranscription: _isActionMode ? _actionDescriptionController.text.trim() : content,
         captureMode: _isActionMode ? 'voice_action' : 'voice_note',
         isActionCandidate: _isActionMode,
         actionStatus: _isActionMode ? (actionStatusOverride ?? 'pending_review') : null,
-        actionText: _isActionMode ? [_actionTitleController.text.trim(), _actionDescriptionController.text.trim()].where((p) => p.isNotEmpty).join('\n\n') : null,
+        actionText: _isActionMode ? _actionDescriptionController.text.trim() : null,
         actionTitle: _isActionMode ? _actionTitleController.text.trim() : null,
         actionDescription: _isActionMode ? _actionDescriptionController.text.trim() : null,
         actionDueText: _isActionMode && actionDueText.isNotEmpty ? actionDueText : null,
@@ -584,12 +712,11 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
             future: _mastersFuture,
             builder: (context, snapshot) {
               final masters = snapshot.data ?? _masterService.fallbackMasterData;
-              _selectedArea ??= _findDefault(masters.areas, 'general', (area) => area.name);
-              _selectedType ??= _findDefault(masters.types, _isActionMode ? 'tarea' : 'nota', (type) => type.name) ??
-                  _findDefault(masters.types, 'nota', (type) => type.name);
+              _selectedArea ??= _findDefault(masters.areas, 'archivo', (area) => area.name);
+              _selectedType ??= _findDefault(masters.types, _isActionMode ? 'tarea' : 'nota', (type) => type.name);
               final topics = _topicsForSelectedArea(masters);
               if (_selectedTopic == null || !topics.contains(_selectedTopic)) {
-                _selectedTopic = _findDefault(topics, 'general', (topic) => topic.name);
+                _selectedTopic = _findDefault(topics, 'anotaciones', (topic) => topic.name);
               }
 
               return SingleChildScrollView(
@@ -607,7 +734,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                       const SizedBox(height: 20),
                       Text('Captura por voz', style: textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
                       const SizedBox(height: 8),
-                      Text('Paso 1: Elegir tipo · Paso 2: Dictar · Paso 3: Revisar · Paso 4: Guardar', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
+                      Text('Asistente guiado: la app pregunta, escuchas cada respuesta por separado y revisas antes de guardar.', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
                       const SizedBox(height: 16),
                       SegmentedButton<VoiceCaptureMode>(
                         segments: const [
@@ -621,26 +748,24 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                         },
                       ),
                       const SizedBox(height: 16),
-                      if (_mode != null) Text(_isActionMode ? 'Crear acción' : 'Dictar contenido', style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+                      if (_mode != null) Text('Modo seleccionado: ${_isActionMode ? 'Acción' : 'Nota'}', style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
                       if (_mode != null) const SizedBox(height: 8),
-                      if (_mode != null) Text(_isActionMode ? 'Dicta la acción o recordatorio. Revise antes de guardar.' : 'Dicta la nota. Revise antes de guardar.', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
+                      if (_mode != null) Text('Paso actual: ${_assistantStep + 1} de ${_lastAssistantStep + 1} · Asistente: ${_assistantMode == VoiceAssistantMode.handsFree ? 'manos libres' : 'normal'}', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
                       const SizedBox(height: 16),
-                      FilledButton.icon(
-                        onPressed: _isSaving || _mode == null ? null : _toggleRecording,
-                        icon: Icon(_isRecording ? Icons.stop_circle_outlined : Icons.mic_none_outlined),
-                        label: Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          child: Text(_isRecording ? 'Detener dictado' : 'Iniciar dictado'),
-                        ),
-                      ),
+                      Wrap(spacing: 8, runSpacing: 8, children: [
+                        FilledButton.icon(onPressed: _isSaving || _mode == null ? null : _startAssistant, icon: const Icon(Icons.play_arrow), label: const Text('Iniciar asistente')),
+                        OutlinedButton.icon(onPressed: _isSaving || _mode == null ? null : _repeatStep, icon: const Icon(Icons.replay), label: const Text('Repetir paso')),
+                        OutlinedButton.icon(onPressed: _isSaving || _mode == null || (_isRecording && _speech.isListening) ? null : _continueDictating, icon: const Icon(Icons.mic_none), label: const Text('Continuar dictando')),
+                        FilledButton.tonalIcon(onPressed: _isSaving || _mode == null ? null : _finishStep, icon: const Icon(Icons.skip_next), label: const Text('Finalizar paso')),
+                      ]),
                       const SizedBox(height: 12),
                       Card(child: ListTile(
                         leading: Icon(_isRecording ? Icons.graphic_eq : Icons.info_outline, color: AppColors.primaryBlue),
                         title: Text(_statusLabel()),
-                        subtitle: Text('Duración: ${_formatDuration(_recordingDuration)}${_hasRecordedAudio ? ' · Audio original listo' : ''}'),
+                        subtitle: Text('Pregunta: ${_currentPrompt.isEmpty ? _promptForStep() : _currentPrompt} · Duración: ${_formatDuration(_recordingDuration)}${_hasRecordedAudio ? ' · Audio original listo' : ''}${_ttsAvailable ? '' : ' · TTS no disponible'}'),
                       )),
                       const SizedBox(height: 16),
-                      NoteTextField(controller: _titleController, label: 'Título', hintText: _defaultTitle, textInputAction: TextInputAction.next),
+                      NoteTextField(controller: _titleController, label: _isActionMode ? 'Título de la acción' : 'Título', hintText: _defaultTitle, textInputAction: TextInputAction.next),
                       const SizedBox(height: 16),
                       _MasterDropdown<AreaMaster>(
                         label: 'Área', value: _selectedArea, items: masters.areas, itemLabel: (area) => area.name,
@@ -658,22 +783,29 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                       ),
                       const SizedBox(height: 16),
                       if (!_isActionMode) ...[
-                        NoteTextField(
-                          controller: _contentController,
-                          label: _contentLabel,
-                          hintText: 'La transcripción aparecerá aquí. Revísela antes de guardar.',
-                          keyboardType: TextInputType.multiline,
-                          minLines: 6,
-                          maxLines: 12,
-                        ),
+                        if (_assistantStep == 2)
+                          NoteTextField(
+                            controller: _confirmationCommandController,
+                            label: 'Respuesta al prompt final',
+                            hintText: 'guardar, repetir título, repetir contenido o cancelar',
+                          )
+                        else
+                          NoteTextField(
+                            controller: _contentController,
+                            label: _contentLabel,
+                            hintText: 'La transcripción aparecerá aquí. Revísela antes de guardar.',
+                            keyboardType: TextInputType.multiline,
+                            minLines: 6,
+                            maxLines: 12,
+                          ),
                       ] else ...[
-                        Text('Asistente de acción: paso ${_actionStep + 1} de 4', style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+                        Text('Asistente de acción: paso ${_assistantStep + 1} de 4', style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
                         const SizedBox(height: 12),
-                        if (_actionStep == 0)
+                        if (_assistantStep == 0)
                           NoteTextField(controller: _actionTitleController, label: '¿Qué quieres hacer?', hintText: 'Llamar a Johana', textInputAction: TextInputAction.next),
-                        if (_actionStep == 1)
+                        if (_assistantStep == 1)
                           NoteTextField(controller: _actionDescriptionController, label: 'Añade detalles', hintText: 'Preguntar si mañana el pedido de Free está hecho', keyboardType: TextInputType.multiline, minLines: 4, maxLines: 8),
-                        if (_actionStep == 2) ...[
+                        if (_assistantStep == 2) ...[
                           NoteTextField(controller: _actionDueTextController, label: '¿Cuándo quieres recordarlo?', hintText: 'mañana a las ocho y media', textInputAction: TextInputAction.next),
                           const SizedBox(height: 8),
                           Builder(builder: (_) {
@@ -682,18 +814,24 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                             return Text(parsed.dueAt == null ? 'No se pudo interpretar la fecha' : 'Fecha/hora interpretada: ${parsed.dueAt!.toLocal()}');
                           }),
                         ],
-                        if (_actionStep == 3) Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        if (_assistantStep == 3) Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                           Text('Revisión final', style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
                           const SizedBox(height: 8),
                           Text('Título: ${_actionTitleController.text.trim()}'),
                           Text('Descripción: ${_actionDescriptionController.text.trim()}'),
                           Text(_parsedDueAt == null ? 'No se pudo interpretar la fecha' : 'Fecha/hora interpretada: ${_parsedDueAt!.toLocal()}'),
+                          const SizedBox(height: 8),
+                          NoteTextField(
+                            controller: _confirmationCommandController,
+                            label: 'Comando reconocido',
+                            hintText: 'calendario, guardar, repetir título, repetir descripción, repetir fecha o cancelar',
+                          ),
                         ]))),
                         const SizedBox(height: 12),
                         Row(children: [
-                          if (_actionStep > 0) Expanded(child: OutlinedButton(onPressed: _isSaving || _isRecording ? null : () => setState(() => _actionStep--), child: const Text('Atrás'))),
-                          if (_actionStep > 0) const SizedBox(width: 12),
-                          if (_actionStep < 3) Expanded(child: FilledButton(onPressed: _isSaving || _isRecording ? null : () { _syncActionContent(); if (_actionStep == 2) _parseDueText(); setState(() => _actionStep++); }, child: const Text('Siguiente'))),
+                          if (_assistantStep > 0) Expanded(child: OutlinedButton(onPressed: _isSaving || _isRecording ? null : () => setState(() => _assistantStep--), child: const Text('Atrás'))),
+                          if (_assistantStep > 0) const SizedBox(width: 12),
+                          if (_assistantStep < 3) Expanded(child: FilledButton(onPressed: _isSaving || _isRecording ? null : _finishStep, child: const Text('Siguiente'))),
                         ]),
                       ],
                       const SizedBox(height: 8),
@@ -713,7 +851,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                       if (_isActionMode) ...[
                         const SizedBox(height: 12),
                         FilledButton.icon(
-                          onPressed: _isSaving || _isRecording || _actionStep != 3 ? null : () => _createCalendarEvent(saveSummary: true),
+                          onPressed: _isSaving || _isRecording || _assistantStep != 3 ? null : () => _createCalendarEvent(saveSummary: true),
                           icon: const Icon(Icons.calendar_month_outlined),
                           label: const Text('Crear en Calendar'),
                         ),
