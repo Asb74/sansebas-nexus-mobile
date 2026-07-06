@@ -27,8 +27,33 @@ enum VoiceCaptureMode { note, action }
 
 enum VoiceAssistantMode { normal, handsFree }
 
+enum VoiceCommandIntent { save, cancel, repeat, calendar, note, action, unknown }
+
 enum _VoiceNoteStatus { choosing, ready, listening, transcribing, review, noVoice }
 
+
+String normalizeVoiceCommand(String text) {
+  const accents = {'á':'a','à':'a','ä':'a','â':'a','é':'e','è':'e','ë':'e','ê':'e','í':'i','ì':'i','ï':'i','î':'i','ó':'o','ò':'o','ö':'o','ô':'o','ú':'u','ù':'u','ü':'u','û':'u'};
+  final buffer = StringBuffer();
+  for (final rune in text.toLowerCase().runes) {
+    final char = String.fromCharCode(rune);
+    buffer.write(accents[char] ?? char);
+  }
+  return buffer.toString().replaceAll(RegExp(r'[^a-zñ0-9 ]'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+}
+
+VoiceCommandIntent detectVoiceCommand(String text) {
+  final command = normalizeVoiceCommand(text);
+  if (command.isEmpty) return VoiceCommandIntent.unknown;
+  bool hasAny(Iterable<String> variants) => variants.any((variant) => command == variant || command.contains(variant));
+  if (hasAny(const ['guardar en calendario', 'crear en calendario', 'crear evento', 'calendario', 'evento'])) return VoiceCommandIntent.calendar;
+  if (hasAny(const ['guardar nota', 'guardar accion', 'guardalo', 'guardar', 'guarda'])) return VoiceCommandIntent.save;
+  if (hasAny(const ['empezar de nuevo', 'repetir todo', 'repetir', 'repite'])) return VoiceCommandIntent.repeat;
+  if (hasAny(const ['cancelar', 'cancela', 'salir', 'descartar'])) return VoiceCommandIntent.cancel;
+  if (hasAny(const ['crear nota', 'nota'])) return VoiceCommandIntent.note;
+  if (hasAny(const ['accion', 'tarea', 'recordatorio'])) return VoiceCommandIntent.action;
+  return VoiceCommandIntent.unknown;
+}
 
 class ParsedSpanishDue {
   const ParsedSpanishDue({this.dueAt, this.confidence = 0});
@@ -38,13 +63,21 @@ class ParsedSpanishDue {
 
 ParsedSpanishDue parseSpanishDueText(String input, {DateTime? now}) {
   final base = now ?? DateTime.now();
-  final text = input.toLowerCase().replaceAll(RegExp(r'[á]'), 'a').replaceAll('é', 'e').replaceAll('í', 'i').replaceAll('ó', 'o').replaceAll('ú', 'u').trim();
+  final text = normalizeVoiceCommand(input);
   if (text.isEmpty) return const ParsedSpanishDue();
+
   var date = DateTime(base.year, base.month, base.day);
   var dateFound = false;
-  if (text.contains('pasado manana')) { date = date.add(const Duration(days: 2)); dateFound = true; }
-  else if (text.contains('manana')) { date = date.add(const Duration(days: 1)); dateFound = true; }
-  else if (text.contains('hoy')) { dateFound = true; }
+  if (text.contains('pasado mañana') || text.contains('pasado manana')) {
+    date = date.add(const Duration(days: 2));
+    dateFound = true;
+  } else if (text.contains('manana') || text.contains('mañana')) {
+    date = date.add(const Duration(days: 1));
+    dateFound = true;
+  } else if (text.contains('hoy') || text.contains('esta tarde')) {
+    dateFound = true;
+  }
+
   final weekdays = {'lunes':1,'martes':2,'miercoles':3,'jueves':4,'viernes':5,'sabado':6,'domingo':7};
   for (final entry in weekdays.entries) {
     if (RegExp('(?:el )?${entry.key}(?: que viene)?').hasMatch(text)) {
@@ -55,29 +88,42 @@ ParsedSpanishDue parseSpanishDueText(String input, {DateTime? now}) {
       break;
     }
   }
+
   final months = {'enero':1,'febrero':2,'marzo':3,'abril':4,'mayo':5,'junio':6,'julio':7,'agosto':8,'septiembre':9,'setiembre':9,'octubre':10,'noviembre':11,'diciembre':12};
   final dateMatch = RegExp(r'(?:dia )?(\d{1,2}) de ([a-z]+)').firstMatch(text);
   if (dateMatch != null && months.containsKey(dateMatch.group(2))) {
-    final day = int.parse(dateMatch.group(1)!); final month = months[dateMatch.group(2)]!;
+    final day = int.parse(dateMatch.group(1)!);
+    final month = months[dateMatch.group(2)]!;
     var year = base.year;
     if (DateTime(year, month, day).isBefore(DateTime(base.year, base.month, base.day))) year++;
-    date = DateTime(year, month, day); dateFound = true;
+    date = DateTime(year, month, day);
+    dateFound = true;
   }
-  int? hour; int minute = 0;
+
   final numberWords = {'una':1,'uno':1,'dos':2,'tres':3,'cuatro':4,'cinco':5,'seis':6,'siete':7,'ocho':8,'nueve':9,'diez':10,'once':11,'doce':12};
-  final numeric = RegExp(r'a las (\d{1,2})(?::(\d{2}))?').firstMatch(text);
-  if (numeric != null) { hour = int.parse(numeric.group(1)!); minute = int.tryParse(numeric.group(2) ?? '0') ?? 0; }
-  else {
-    for (final entry in numberWords.entries) {
-      if (text.contains('a las ${entry.key}')) { hour = entry.value; break; }
+  int? parseHourToken(String token) => int.tryParse(token) ?? numberWords[token];
+
+  int? hour;
+  var minute = 0;
+  final numeric = RegExp(r'(?:a las|las) (\d{1,2})(?::(\d{2}))?').firstMatch(text) ?? RegExp(r'\b(\d{1,2}):(\d{2})\b').firstMatch(text);
+  if (numeric != null) {
+    hour = int.parse(numeric.group(1)!);
+    minute = int.tryParse(numeric.group(2) ?? '0') ?? 0;
+  } else {
+    final wordMatch = RegExp(r'(?:a las |las )([a-z]+)(?: y media)?').firstMatch(text);
+    if (wordMatch != null) hour = parseHourToken(wordMatch.group(1)!);
+    if (hour == null) {
+      for (final entry in numberWords.entries) {
+        if (text.contains(entry.key)) { hour = entry.value; break; }
+      }
     }
     if (hour != null && text.contains('media')) minute = 30;
   }
   if (text.contains('mediodia')) { hour = 12; minute = 0; }
-  if (hour == null && text.contains('esta tarde')) { hour = 17; minute = 0; dateFound = true; }
-  if (hour == null && text.contains('por la manana')) { hour = 9; minute = 0; }
+  if (hour == null && text.contains('esta tarde')) hour = 18;
+  if (hour == null && (text.contains('por la manana') || text.contains('por la mañana'))) hour = 9;
   if (hour != null && hour < 12 && (text.contains('tarde') || text.contains('noche'))) hour += 12;
-  if (hour != null && text.contains('manana') && text.contains('de la manana') && hour == 12) hour = 0;
+  if (hour != null && hour == 12 && text.contains('manana') && text.contains('de la manana')) hour = 0;
   if (!dateFound && hour == null) return const ParsedSpanishDue();
   return ParsedSpanishDue(dueAt: DateTime(date.year, date.month, date.day, hour ?? 9, minute), confidence: dateFound && hour != null ? .9 : .65);
 }
@@ -141,6 +187,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   String _lastPartialSpeech = '';
   bool _manualStopRequested = false;
   bool _speechUnavailable = false;
+  Timer? _autoAdvanceTimer;
   String _dictationStateLabel = 'Finalizado';
   DateTime? _parsedDueAt;
   double? _parsedDueConfidence;
@@ -150,12 +197,13 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     super.initState();
     _mastersFuture = _masterService.loadMasters();
     _draftMobileNoteId = _uuid.v4();
-    unawaited(_configureTts());
+    unawaited(_configureTts().then((_) => _startModeChoice()));
   }
 
   @override
   void dispose() {
     _durationTimer?.cancel();
+    _autoAdvanceTimer?.cancel();
     _speech.cancel();
     _audioRecorder.dispose();
     _tts.stop();
@@ -200,23 +248,36 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     }
   }
 
+  String _formatDue(DateTime dueAt) => '${dueAt.day.toString().padLeft(2, '0')}/${dueAt.month.toString().padLeft(2, '0')}/${dueAt.year} ${dueAt.hour.toString().padLeft(2, '0')}:${dueAt.minute.toString().padLeft(2, '0')}';
+
   String _promptForStep() {
+    if (_mode == null) return '¿Quieres crear una nota o una acción?';
     if (!_isActionMode) {
       return switch (_assistantStep) {
         0 => 'Título de la nota',
         1 => '¿Qué quieres anotar?',
-        _ => 'Nota lista. ¿Quieres guardar, repetir o cancelar?',
+        _ => 'Nota lista. Di guardar, repetir o cancelar.',
       };
     }
     return switch (_assistantStep) {
       0 => 'Título de la acción',
       1 => 'Describe la acción',
       2 => '¿Cuándo quieres recordarlo?',
-      _ => 'Acción lista. ¿Quieres crearla en calendario, guardarla en Nexus, repetir o cancelar?',
+      _ => 'Acción lista. Di calendario, guardar, repetir o cancelar.',
     };
   }
 
-  void _selectMode(VoiceCaptureMode mode) {
+  Future<void> _startModeChoice() async {
+    if (!mounted || _mode != null || _isSaving) return;
+    setState(() {
+      _assistantMode = VoiceAssistantMode.handsFree;
+      _status = _VoiceNoteStatus.choosing;
+    });
+    await _speak('¿Quieres crear una nota o una acción?');
+    await _startRecording();
+  }
+
+  void _selectMode(VoiceCaptureMode mode, {bool autoStart = false}) {
     if (_isSaving || _isRecording) return;
     setState(() {
       _mode = mode;
@@ -237,6 +298,10 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       _parsedDueAt = null;
       _parsedDueConfidence = null;
     });
+    if (autoStart) {
+      _confirmationCommandController.clear();
+      unawaited(_startAssistant());
+    }
   }
   bool get _hasRecordedAudio => _audioPath != null;
 
@@ -270,8 +335,16 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   Future<void> _finishStep() async {
     if (_isRecording) await _stopRecording(markReview: false);
     _commitActiveController();
-    final command = _normalizedCommand(_activeDictationController.text);
-    if (_isConfirmationStep && await _handleVoiceCommand(command)) return;
+    final spokenText = _activeDictationController.text;
+    final intent = detectVoiceCommand(spokenText);
+    if (_mode == null) {
+      if (intent == VoiceCommandIntent.note) { _selectMode(VoiceCaptureMode.note, autoStart: true); return; }
+      if (intent == VoiceCommandIntent.action) { _selectMode(VoiceCaptureMode.action, autoStart: true); return; }
+      await _speak('No he entendido. Di nota o acción.');
+      await _startRecording();
+      return;
+    }
+    if (_isConfirmationStep && await _handleVoiceCommand(intent)) return;
     if (_assistantStep < _lastAssistantStep) {
       setState(() => _assistantStep++);
       await _speak(_promptForStep());
@@ -395,6 +468,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   }
 
   TextEditingController get _activeDictationController {
+    if (_mode == null) return _confirmationCommandController;
     if (!_isActionMode) {
       return switch (_assistantStep) {
         0 => _titleController,
@@ -431,8 +505,16 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
 
   void _onSpeechResult(SpeechRecognitionResult result) {
     if (!mounted) return;
-    final recognized = result.recognizedWords.trim();
+    var recognized = result.recognizedWords.trim();
     if (recognized.isEmpty) return;
+    final finishDictation = _mode != null && !_isConfirmationStep && normalizeVoiceCommand(recognized).split(' ').contains('finalizar');
+    if (finishDictation) {
+      recognized = recognized.replaceAll(RegExp(r'\bfinalizar\b', caseSensitive: false), '').trim();
+      if (recognized.isEmpty) {
+        unawaited(_finishStep());
+        return;
+      }
+    }
     if (result.finalResult) {
       if (!_finalSpeechBuffer.endsWith(recognized)) {
         _finalSpeechBuffer = [_finalSpeechBuffer, recognized].where((part) => part.trim().isNotEmpty).join(' ');
@@ -446,6 +528,18 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     controller.text = merged;
     controller.selection = TextSelection.collapsed(offset: controller.text.length);
     _commitActiveController();
+    if (finishDictation) {
+      unawaited(_finishStep());
+    } else if (result.finalResult) {
+      _scheduleAutoAdvance();
+    }
+  }
+
+  void _scheduleAutoAdvance() {
+    _autoAdvanceTimer?.cancel();
+    _autoAdvanceTimer = Timer(const Duration(milliseconds: 900), () {
+      if (mounted && _isRecording && !_manualStopRequested) unawaited(_finishStep());
+    });
   }
 
   void _onSpeechStatus(String status) {
@@ -480,58 +574,54 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     }
   }
 
-  String _normalizedCommand(String text) {
-    return text.toLowerCase()
-        .replaceAll('á', 'a')
-        .replaceAll('é', 'e')
-        .replaceAll('í', 'i')
-        .replaceAll('ó', 'o')
-        .replaceAll('ú', 'u')
-        .replaceAll('ü', 'u')
-        .replaceAll(RegExp(r'[^a-zñ ]'), ' ')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-  }
+  String _normalizedCommand(String text) => normalizeVoiceCommand(text);
 
-  Future<bool> _handleVoiceCommand(String command) async {
-    if (command.contains('cancelar')) {
+  Future<bool> _handleVoiceCommand(VoiceCommandIntent intent) async {
+    if (intent == VoiceCommandIntent.cancel) {
+      await _speak('Cancelado');
       if (mounted) Navigator.pop(context);
       return true;
     }
-    if (command.contains('repetir titulo')) {
-      setState(() => _assistantStep = 0);
-      await _repeatStep();
+    if (intent == VoiceCommandIntent.repeat) {
+      _resetCurrentFlow();
+      await _speak(_promptForStep());
+      await _startRecording();
       return true;
     }
-    if (command.contains('repetir contenido') && !_isActionMode) {
-      setState(() => _assistantStep = 1);
-      await _repeatStep();
-      return true;
-    }
-    if (command.contains('repetir descripcion') && _isActionMode) {
-      setState(() => _assistantStep = 1);
-      await _repeatStep();
-      return true;
-    }
-    if (command.contains('repetir fecha') && _isActionMode) {
-      setState(() => _assistantStep = 2);
-      await _repeatStep();
-      return true;
-    }
-    if (command == 'repetir' || command.contains(' repetir ')) {
-      await _repeatStep();
-      return true;
-    }
-    if (_isActionMode && command.contains('calendario')) {
+    if (_isActionMode && intent == VoiceCommandIntent.calendar) {
+      if (_parsedDueAt == null) {
+        await _speak('No he entendido la fecha. Dime cuándo quieres recordarlo.');
+        setState(() => _assistantStep = 2);
+        await _startRecording();
+        return true;
+      }
       await _createCalendarEvent(saveSummary: true);
       return true;
     }
-    if (command.contains('guardar')) {
+    if (intent == VoiceCommandIntent.save) {
+      await _speak(_isActionMode ? 'Acción guardada' : 'Nota guardada');
       await _saveNote();
       return true;
     }
     return false;
   }
+
+  void _resetCurrentFlow() {
+    setState(() {
+      _assistantStep = 0;
+      _titleController.clear();
+      _contentController.clear();
+      _actionTitleController.clear();
+      _actionDescriptionController.clear();
+      _actionDueTextController.clear();
+      _confirmationCommandController.clear();
+      _parsedDueAt = null;
+      _parsedDueConfidence = null;
+      _finalSpeechBuffer = '';
+      _lastPartialSpeech = '';
+    });
+  }
+
 
   void _syncActionContent() {
     _titleController.text = _actionTitleController.text;
@@ -655,7 +745,13 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   Future<void> _createCalendarEvent({bool saveSummary = true}) async {
     _parseDueText();
     final dueAt = _parsedDueAt;
-    if (dueAt == null) return _showMessage('No se pudo interpretar la fecha');
+    if (dueAt == null) {
+      _showMessage('No he entendido la fecha. Dime cuándo quieres recordarlo.');
+      setState(() => _assistantStep = 2);
+      await _speak('No he entendido la fecha. Dime cuándo quieres recordarlo.');
+      await _startRecording();
+      return;
+    }
     final title = _actionTitleController.text.trim();
     if (title.isEmpty) return _showMessage('El título de la acción es obligatorio');
     if (!Platform.isAndroid) return _showMessage('Calendar Intent solo está disponible en Android');
@@ -672,7 +768,13 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         'hasAlarm': true,
       },
     );
-    await intent.launch();
+    try {
+      await intent.launch();
+    } catch (error) {
+      debugPrint('No se pudo abrir Calendar Intent: $error');
+      _showMessage('No se pudo abrir Calendar. Puedes guardar la acción en Nexus.');
+      return;
+    }
     if (saveSummary) {
       await _saveActionSummary(calendarCreated: true, status: 'sent_to_calendar');
     }
@@ -680,7 +782,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
 
   Future<void> _saveActionSummary({required bool calendarCreated, required String status}) async {
     if (!_isActionMode) return;
-    await _saveNote(calendarCreatedOverride: calendarCreated, actionStatusOverride: status, popAfterSave: false);
+    await _saveNote(calendarCreatedOverride: calendarCreated, actionStatusOverride: status);
   }
 
   void _showMessage(String message) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
@@ -734,7 +836,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                       const SizedBox(height: 20),
                       Text('Captura por voz', style: textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
                       const SizedBox(height: 8),
-                      Text('Asistente guiado: la app pregunta, escuchas cada respuesta por separado y revisas antes de guardar.', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
+                      Text('Asistente manos libres: la app pregunta, escucha y avanza paso a paso. Los botones quedan como fallback.', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
                       const SizedBox(height: 16),
                       SegmentedButton<VoiceCaptureMode>(
                         segments: const [
@@ -748,6 +850,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                         },
                       ),
                       const SizedBox(height: 16),
+                      Text('Paso actual: ${_mode == null ? 'Selección de modo' : (_assistantStep + 1).toString()} · Pregunta actual: ${_currentPrompt.isEmpty ? (_mode == null ? '¿Quieres crear una nota o una acción?' : _promptForStep()) : _currentPrompt}', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
+                      const SizedBox(height: 8),
                       if (_mode != null) Text('Modo seleccionado: ${_isActionMode ? 'Acción' : 'Nota'}', style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
                       if (_mode != null) const SizedBox(height: 8),
                       if (_mode != null) Text('Paso actual: ${_assistantStep + 1} de ${_lastAssistantStep + 1} · Asistente: ${_assistantMode == VoiceAssistantMode.handsFree ? 'manos libres' : 'normal'}', style: textTheme.bodyMedium?.copyWith(color: AppColors.textSecondary)),
@@ -786,8 +890,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                         if (_assistantStep == 2)
                           NoteTextField(
                             controller: _confirmationCommandController,
-                            label: 'Respuesta al prompt final',
-                            hintText: 'guardar, repetir título, repetir contenido o cancelar',
+                            label: 'Comando de confirmación',
+                            hintText: 'guardar, repetir o cancelar',
                           )
                         else
                           NoteTextField(
@@ -811,7 +915,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                           Builder(builder: (_) {
                             final parsed = parseSpanishDueText(_actionDueTextController.text, now: DateTime.now());
                             _parsedDueAt = parsed.dueAt; _parsedDueConfidence = parsed.confidence;
-                            return Text(parsed.dueAt == null ? 'No se pudo interpretar la fecha' : 'Fecha/hora interpretada: ${parsed.dueAt!.toLocal()}');
+                            return Text(parsed.dueAt == null ? 'No se pudo interpretar la fecha' : 'Fecha interpretada: ${_formatDue(parsed.dueAt!)}');
                           }),
                         ],
                         if (_assistantStep == 3) Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -819,12 +923,12 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                           const SizedBox(height: 8),
                           Text('Título: ${_actionTitleController.text.trim()}'),
                           Text('Descripción: ${_actionDescriptionController.text.trim()}'),
-                          Text(_parsedDueAt == null ? 'No se pudo interpretar la fecha' : 'Fecha/hora interpretada: ${_parsedDueAt!.toLocal()}'),
+                          Text(_parsedDueAt == null ? 'No se pudo interpretar la fecha' : 'Fecha interpretada: ${_formatDue(_parsedDueAt!)}'),
                           const SizedBox(height: 8),
                           NoteTextField(
                             controller: _confirmationCommandController,
                             label: 'Comando reconocido',
-                            hintText: 'calendario, guardar, repetir título, repetir descripción, repetir fecha o cancelar',
+                            hintText: 'calendario, guardar, repetir o cancelar',
                           ),
                         ]))),
                         const SizedBox(height: 12),
