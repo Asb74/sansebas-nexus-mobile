@@ -31,7 +31,7 @@ enum VoiceCommandIntent { save, cancel, repeat, repeatTitle, repeatContent, repe
 
 enum VoiceAssistantState { askMode, askTitle, askContent, askDate, confirm, save, cancel, finished }
 
-enum _VoiceNoteStatus { choosing, ready, listening, transcribing, speaking, waiting, review, noVoice }
+enum _VoiceNoteStatus { choosing, ready, listening, transcribing, speaking, preparing, waiting, review, noVoice }
 
 String normalizeVoiceCommand(String text) {
   const accents = {'á':'a','à':'a','ä':'a','â':'a','é':'e','è':'e','ë':'e','ê':'e','í':'i','ì':'i','ï':'i','î':'i','ó':'o','ò':'o','ö':'o','ô':'o','ú':'u','ù':'u','ü':'u','û':'u'};
@@ -57,6 +57,20 @@ VoiceCommandIntent detectVoiceCommand(String text) {
   if (hasAny(const ['crear nota', 'nota'])) return VoiceCommandIntent.note;
   if (hasAny(const ['accion', 'tarea', 'recordatorio'])) return VoiceCommandIntent.action;
   return VoiceCommandIntent.unknown;
+}
+
+class _VoiceListeningConfig {
+  const _VoiceListeningConfig({
+    required this.minimumListeningTime,
+    required this.silenceAfterSpeech,
+    required this.maxListeningTime,
+    this.allowContinueDictating = false,
+  });
+
+  final Duration minimumListeningTime;
+  final Duration silenceAfterSpeech;
+  final Duration maxListeningTime;
+  final bool allowContinueDictating;
 }
 
 class ParsedSpanishDue {
@@ -187,6 +201,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   bool _isSaving = false;
   bool _attachOriginalAudio = false;
   DateTime? _recordingStartedAt;
+  DateTime? _listeningStartedAt;
+  DateTime? _speechFirstDetectedAt;
   Duration _recordingDuration = Duration.zero;
   Timer? _durationTimer;
   String? _audioPath;
@@ -196,6 +212,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   bool _manualStopRequested = false;
   bool _speechUnavailable = false;
   Timer? _autoAdvanceTimer;
+  Timer? _maxListeningTimer;
   String _dictationStateLabel = 'Finalizado';
   DateTime? _parsedDueAt;
   double? _parsedDueConfidence;
@@ -212,6 +229,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   void dispose() {
     _durationTimer?.cancel();
     _autoAdvanceTimer?.cancel();
+    _maxListeningTimer?.cancel();
     _speech.cancel();
     _audioRecorder.dispose();
     _tts.stop();
@@ -230,6 +248,30 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   String get _contentLabel => _isActionMode ? 'Descripción' : 'Contenido / transcripción';
   int get _lastAssistantStep => _isActionMode ? 3 : 2;
   bool get _isConfirmationStep => _assistantStep == _lastAssistantStep;
+  bool get _isLongContentStep => _mode != null && ((_isActionMode && _assistantStep == 1) || (!_isActionMode && _assistantStep == 1));
+
+  _VoiceListeningConfig get _listeningConfig {
+    if (_isLongContentStep) {
+      return const _VoiceListeningConfig(
+        minimumListeningTime: Duration(milliseconds: 4000),
+        silenceAfterSpeech: Duration(milliseconds: 2500),
+        maxListeningTime: Duration(seconds: 60),
+        allowContinueDictating: true,
+      );
+    }
+    if (_mode != null && ((_isActionMode && (_assistantStep == 0 || _assistantStep == 2)) || (!_isActionMode && _assistantStep == 0))) {
+      return const _VoiceListeningConfig(
+        minimumListeningTime: Duration(milliseconds: 2500),
+        silenceAfterSpeech: Duration(milliseconds: 1200),
+        maxListeningTime: Duration(seconds: 10),
+      );
+    }
+    return const _VoiceListeningConfig(
+      minimumListeningTime: Duration(milliseconds: 2500),
+      silenceAfterSpeech: Duration(milliseconds: 900),
+      maxListeningTime: Duration(seconds: 7),
+    );
+  }
 
   Future<void> _configureTts() async {
     try {
@@ -250,18 +292,20 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       _status = _VoiceNoteStatus.speaking;
     });
     if (!_ttsAvailable) {
-      setState(() => _status = _VoiceNoteStatus.waiting);
+      setState(() => _status = _VoiceNoteStatus.preparing);
       return;
     }
     try {
+      debugPrint('Asistente voz - TTS start state=$_assistantState prompt="$text"');
       await _tts.stop();
       await _tts.speak(text);
+      debugPrint('Asistente voz - TTS end state=$_assistantState');
     } catch (error) {
       debugPrint('No se pudo reproducir prompt TTS: $error');
       if (mounted) setState(() => _ttsAvailable = false);
     } finally {
       if (mounted && _status == _VoiceNoteStatus.speaking) {
-        setState(() => _status = _VoiceNoteStatus.waiting);
+        setState(() => _status = _VoiceNoteStatus.preparing);
       }
     }
   }
@@ -305,7 +349,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       _status = _VoiceNoteStatus.choosing;
     });
     await _speak('¿Quieres crear una nota o una acción?');
-    await _startRecording();
+    await _startRecordingAfterTts();
   }
 
   void _selectMode(VoiceCaptureMode mode, {bool autoStart = false}) {
@@ -344,7 +388,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     if (_mode == null || _isSaving) return;
     setState(() => _status = _VoiceNoteStatus.ready);
     await _speak(_promptForStep());
-    await _startRecording();
+    await _startRecordingAfterTts();
   }
 
   Future<void> _repeatStep() async {
@@ -353,7 +397,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     _activeDictationController.clear();
     _commitActiveController();
     await _speak(_promptForStep());
-    await _startRecording();
+    await _startRecordingAfterTts();
   }
 
   Future<void> _continueDictating() async {
@@ -364,7 +408,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       if (mounted) setState(() => _dictationStateLabel = 'Escuchando...');
       return;
     }
-    if (!_isRecording) await _startRecording();
+    if (!_isRecording) await _startRecordingAfterTts();
   }
 
   bool _isCommandOnly(String text) {
@@ -392,7 +436,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       return;
     }
     await _speak('$message ${_promptForStep()}.');
-    await _startRecording();
+    await _startRecordingAfterTts();
   }
 
   String _monthName(int month) => const [
@@ -422,11 +466,14 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     return 'He entendido: Título: ${_actionTitleController.text.trim()}. Acción: ${_actionDescriptionController.text.trim()}. Fecha: ${_actionDueTextController.text.trim()}. $interpreted ¿Quieres guardar, repetir o cancelar?';
   }
 
-  Future<void> _finishStep() async {
+  Future<void> _finishStep({String reason = 'manual o final'}) async {
+    final listened = _listeningStartedAt == null ? Duration.zero : DateTime.now().difference(_listeningStartedAt!);
+    debugPrint('Asistente voz - process response state=$_assistantState reason=$reason listened=${listened.inMilliseconds}ms minMet=${listened >= _listeningConfig.minimumListeningTime}');
     if (_isRecording) await _stopRecording(markReview: false);
     _commitActiveController();
     final spokenText = _activeDictationController.text;
     final intent = detectVoiceCommand(spokenText);
+    debugPrint('Asistente voz - comando detectado=$intent textPresent=${spokenText.trim().isNotEmpty}');
     setState(() => _lastDetectedAnswer = spokenText.trim());
     if (_looksInvalidSpeech(spokenText)) {
       await _retryCurrentQuestion(message: spokenText.trim().isEmpty ? 'No te he oído.' : 'No he entendido la respuesta.');
@@ -447,7 +494,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         _syncStateFromStep();
       });
       await _speak(_confirmationSummary());
-      await _startRecording();
+      await _startRecordingAfterTts();
     } else if (_assistantStep < _lastAssistantStep) {
       setState(() {
         _assistantStep++;
@@ -455,15 +502,17 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         _syncStateFromStep();
       });
       await _speak(_isConfirmationStep ? _confirmationSummary() : _promptForStep());
-      await _startRecording();
+      await _startRecordingAfterTts();
     } else {
       await _speak(_confirmationSummary());
-      await _startRecording();
+      await _startRecordingAfterTts();
     }
   }
 
   Future<void> _startRecording() async {
     try {
+      _autoAdvanceTimer?.cancel();
+      _maxListeningTimer?.cancel();
       final permissionGranted = await _audioRecorder.hasPermission();
       debugPrint('Dictado voz - permission granted: $permissionGranted');
       if (!permissionGranted) {
@@ -498,9 +547,12 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       }
 
       if (!mounted) return;
+      final now = DateTime.now();
       setState(() {
         _status = _VoiceNoteStatus.listening;
-        _recordingStartedAt = DateTime.now();
+        _recordingStartedAt = now;
+        _listeningStartedAt = now;
+        _speechFirstDetectedAt = null;
         _recordingDuration = Duration.zero;
         _audioPath = path;
         _audioDurationSeconds = null;
@@ -510,7 +562,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       _speechUnavailable = false;
       _primeSpeechBuffer();
       await _listenContinuously(localeId: localeId);
-      debugPrint('Dictado voz - listening: ${_speech.isListening}');
+      debugPrint('Asistente voz - listen start state=$_assistantState min=${_listeningConfig.minimumListeningTime.inMilliseconds}ms silence=${_listeningConfig.silenceAfterSpeech.inMilliseconds}ms max=${_listeningConfig.maxListeningTime.inMilliseconds}ms listening=${_speech.isListening}');
+      _scheduleMaxListeningTimeout();
 
       _durationTimer?.cancel();
       _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -526,6 +579,15 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       setState(() => _status = _VoiceNoteStatus.ready);
       _showMessage('Reconocimiento de voz no disponible en este dispositivo');
     }
+  }
+
+  Future<void> _startRecordingAfterTts() async {
+    if (!mounted) return;
+    debugPrint('Asistente voz - prep before listen state=$_assistantState');
+    setState(() => _status = _VoiceNoteStatus.preparing);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    if (!mounted || _isSaving) return;
+    await _startRecording();
   }
 
   Future<String?> _preferredSpanishLocaleId() async {
@@ -550,6 +612,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   Future<void> _stopRecording({bool markReview = true}) async {
     setState(() => _status = _VoiceNoteStatus.transcribing);
     _durationTimer?.cancel();
+    _autoAdvanceTimer?.cancel();
+    _maxListeningTimer?.cancel();
     final startedAt = _recordingStartedAt;
     try {
       _manualStopRequested = true;
@@ -563,6 +627,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         _audioPath = stoppedPath ?? _audioPath;
         _audioDurationSeconds = startedAt == null ? null : DateTime.now().difference(startedAt).inSeconds;
         _recordingStartedAt = null;
+        _listeningStartedAt = null;
+        _speechFirstDetectedAt = null;
         _dictationStateLabel = 'Finalizado';
       });
       _commitActiveController();
@@ -601,29 +667,47 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   }
 
   Future<void> _listenContinuously({String? localeId}) async {
+    final config = _listeningConfig;
     await _speech.listen(
       onResult: _onSpeechResult,
       listenMode: ListenMode.dictation,
       partialResults: true,
-      listenFor: const Duration(seconds: 20),
-      pauseFor: const Duration(milliseconds: 900),
+      listenFor: config.maxListeningTime,
+      pauseFor: config.silenceAfterSpeech,
       localeId: localeId,
     );
+  }
+
+  void _scheduleMaxListeningTimeout() {
+    _maxListeningTimer?.cancel();
+    final config = _listeningConfig;
+    _maxListeningTimer = Timer(config.maxListeningTime, () {
+      if (!mounted || !_isRecording || _manualStopRequested) return;
+      final text = _activeDictationController.text.trim();
+      debugPrint('Asistente voz - max listen reached state=$_assistantState textPresent=${text.isNotEmpty}');
+      if (text.isEmpty) {
+        unawaited(_finishStep(reason: 'maxListeningTime sin texto'));
+      } else {
+        _scheduleAutoAdvance(reason: 'maxListeningTime con texto');
+      }
+    });
   }
 
   void _onSpeechResult(SpeechRecognitionResult result) {
     if (!mounted) return;
     var recognized = result.recognizedWords.trim();
     if (recognized.isEmpty) return;
+    _speechFirstDetectedAt ??= DateTime.now();
+    debugPrint('Asistente voz - texto ${result.finalResult ? 'final' : 'parcial'} state=$_assistantState length=${recognized.length}');
     if (result.finalResult && result.confidence > 0 && result.confidence < .25) {
-      unawaited(_retryCurrentQuestion(message: 'No he entendido la respuesta.'));
+      _scheduleAutoAdvance(reason: 'confianza baja');
       return;
     }
     final finishDictation = _mode != null && !_isConfirmationStep && normalizeVoiceCommand(recognized).split(' ').contains('finalizar');
     if (finishDictation) {
       recognized = recognized.replaceAll(RegExp(r'\bfinalizar\b', caseSensitive: false), '').trim();
       if (recognized.isEmpty) {
-        unawaited(_finishStep());
+        unawaited(_finishStep(reason: 'comando finalizar'));
         return;
       }
     }
@@ -641,16 +725,24 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     controller.selection = TextSelection.collapsed(offset: controller.text.length);
     _commitActiveController();
     if (finishDictation) {
-      unawaited(_finishStep());
+      unawaited(_finishStep(reason: 'comando finalizar'));
     } else if (result.finalResult) {
-      _scheduleAutoAdvance();
+      _scheduleAutoAdvance(reason: 'finalResult');
     }
   }
 
-  void _scheduleAutoAdvance() {
+  void _scheduleAutoAdvance({String reason = 'silenceAfterSpeech'}) {
     _autoAdvanceTimer?.cancel();
-    _autoAdvanceTimer = Timer(const Duration(milliseconds: 150), () {
-      if (mounted && _isRecording && !_manualStopRequested) unawaited(_finishStep());
+    final config = _listeningConfig;
+    final listened = _listeningStartedAt == null ? Duration.zero : DateTime.now().difference(_listeningStartedAt!);
+    final minimumRemaining = config.minimumListeningTime - listened;
+    final delay = minimumRemaining.isNegative ? config.silenceAfterSpeech : minimumRemaining;
+    debugPrint('Asistente voz - scheduling process reason=$reason delay=${delay.inMilliseconds}ms listened=${listened.inMilliseconds}ms minMet=${listened >= config.minimumListeningTime} voiceStarted=${_speechFirstDetectedAt != null}');
+    _autoAdvanceTimer = Timer(delay, () {
+      if (mounted && _isRecording && !_manualStopRequested) {
+        setState(() => _dictationStateLabel = 'Procesando respuesta...');
+        unawaited(_finishStep(reason: reason));
+      }
     });
   }
 
@@ -659,8 +751,16 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     if (status == 'notListening' || status == 'done') {
       debugPrint('Dictado voz - listening false, estado speech_to_text: $status');
       if (_isRecording && !_manualStopRequested && !_speechUnavailable) {
-        setState(() => _dictationStateLabel = 'Procesando...');
-        unawaited(_finishStep());
+        final text = _activeDictationController.text.trim();
+        if (text.isEmpty) {
+          final listened = _listeningStartedAt == null ? Duration.zero : DateTime.now().difference(_listeningStartedAt!);
+          if (listened < _listeningConfig.maxListeningTime) {
+            debugPrint('Asistente voz - STT ended without text before max; waiting maxListeningTime listened=${listened.inMilliseconds}ms');
+            return;
+          }
+        }
+        setState(() => _dictationStateLabel = 'Procesando respuesta...');
+        _scheduleAutoAdvance(reason: 'speech status $status');
       }
     } else if (status == 'listening') {
       debugPrint('Dictado voz - listening true');
@@ -673,7 +773,12 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     );
     if (!mounted) return;
     if (error.errorMsg == 'error_no_match' || error.errorMsg == 'error_speech_timeout') {
-      unawaited(_retryCurrentQuestion(message: 'No te he oído.'));
+      final listened = _listeningStartedAt == null ? Duration.zero : DateTime.now().difference(_listeningStartedAt!);
+      if (listened < _listeningConfig.maxListeningTime && _activeDictationController.text.trim().isEmpty) {
+        debugPrint('Asistente voz - speech error before max; waiting maxListeningTime listened=${listened.inMilliseconds}ms');
+        return;
+      }
+      unawaited(_finishStep(reason: 'speech error ${error.errorMsg}'));
     } else if (error.permanent) {
       _speechUnavailable = true;
       _showMessage('Reconocimiento de voz no disponible en este dispositivo');
@@ -698,7 +803,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     if (intent == VoiceCommandIntent.repeat) {
       _resetCurrentFlow();
       await _speak(_promptForStep());
-      await _startRecording();
+      await _startRecordingAfterTts();
       return true;
     }
     if (intent == VoiceCommandIntent.repeatTitle) {
@@ -717,7 +822,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       if (_parsedDueAt == null) {
         await _speak('No he entendido la fecha. Dime cuándo quieres recordarlo.');
         setState(() => _assistantStep = 2);
-        await _startRecording();
+        await _startRecordingAfterTts();
         return true;
       }
       await _createCalendarEvent(saveSummary: true);
@@ -751,7 +856,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       _syncStateFromStep();
     });
     await _speak(_promptForStep());
-    await _startRecording();
+    await _startRecordingAfterTts();
   }
 
   void _resetCurrentFlow() {
@@ -900,7 +1005,7 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       _showMessage('No he entendido la fecha. Dime cuándo quieres recordarlo.');
       setState(() => _assistantStep = 2);
       await _speak('No he entendido la fecha. Dime cuándo quieres recordarlo.');
-      await _startRecording();
+      await _startRecordingAfterTts();
       return;
     }
     final title = _actionTitleController.text.trim();
@@ -942,8 +1047,9 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         _VoiceNoteStatus.choosing => 'Elige qué quieres crear',
         _VoiceNoteStatus.ready => 'Preparado',
         _VoiceNoteStatus.listening => _dictationStateLabel,
-        _VoiceNoteStatus.transcribing => 'Procesando',
-        _VoiceNoteStatus.speaking => 'Hablando',
+        _VoiceNoteStatus.transcribing => 'Procesando respuesta...',
+        _VoiceNoteStatus.speaking => 'Hablando...',
+        _VoiceNoteStatus.preparing => 'Prepárate para responder...',
         _VoiceNoteStatus.waiting => 'Esperando respuesta',
         _VoiceNoteStatus.review => 'Listo para revisar',
         _VoiceNoteStatus.noVoice => 'No se detectó voz',
