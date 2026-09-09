@@ -1,0 +1,156 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:record/record.dart';
+import 'package:uuid/uuid.dart';
+
+import '../models/recording_session.dart';
+import 'recording_session_store.dart';
+
+class AudioSegmentationPolicy {
+  const AudioSegmentationPolicy({
+    this.segmentDuration = const Duration(minutes: 5),
+    this.bitsPerSecond = 128000,
+    this.safeBytes = 20 * 1024 * 1024,
+  });
+
+  final Duration segmentDuration;
+  final int bitsPerSecond;
+  final int safeBytes;
+
+  int get estimatedSegmentBytes => (segmentDuration.inSeconds * bitsPerSecond / 8).ceil();
+  bool get isWithinSafeThreshold => estimatedSegmentBytes <= safeBytes;
+  int segmentCount(Duration total) {
+    final count = (total.inSeconds / segmentDuration.inSeconds).ceil();
+    return count < 1 ? 1 : count;
+  }
+}
+
+abstract interface class AudioRecorderAdapter {
+  Future<bool> hasPermission();
+  Future<void> start(String path);
+  Future<String?> stop();
+  Future<bool> isRecording();
+}
+
+class RecordAudioRecorderAdapter implements AudioRecorderAdapter {
+  RecordAudioRecorderAdapter(this.recorder);
+
+  final AudioRecorder recorder;
+
+  @override
+  Future<bool> hasPermission() => recorder.hasPermission();
+
+  @override
+  Future<bool> isRecording() => recorder.isRecording();
+
+  @override
+  Future<void> start(String path) => recorder.start(
+        const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 128000, sampleRate: 44100),
+        path: path,
+      );
+
+  @override
+  Future<String?> stop() => recorder.stop();
+}
+
+/// Records a voice note into bounded local files. Five minutes of 128-kbit AAC
+/// is well below the 20 MB safe threshold, so no large file is sent upstream.
+class SafeAudioRecorder {
+  SafeAudioRecorder({
+    required RecordingSessionStore store,
+    required AudioRecorderAdapter recorder,
+    this.segmentDuration = const Duration(minutes: 5),
+    Uuid uuid = const Uuid(),
+  })  : _store = store,
+        _recorder = recorder,
+        _uuid = uuid;
+
+  final RecordingSessionStore _store;
+  final AudioRecorderAdapter _recorder;
+  final Duration segmentDuration;
+  final Uuid _uuid;
+
+  RecordingSession? _session;
+  DateTime? _segmentStartedAt;
+  Timer? _rolloverTimer;
+  bool _rollingOver = false;
+
+  RecordingSession? get session => _session;
+
+  Future<RecordingSession> start() async {
+    if (!await _recorder.hasPermission()) throw const AudioRecordingException('microphone_permission_denied');
+    final session = RecordingSession(
+      id: _uuid.v4(),
+      startedAt: DateTime.now(),
+      status: RecordingSessionStatus.recording,
+    );
+    _session = session;
+    await _store.save(session);
+    await _startSegment();
+    debugPrint('AUDIO_RECORDING: started');
+    return session;
+  }
+
+  Future<void> _startSegment() async {
+    final current = _session;
+    if (current == null) return;
+    final directory = await _store.audioDirectory(current.id);
+    final index = current.segments.length;
+    final path = '${directory.path}/segment_${index.toString().padLeft(4, '0')}.m4a';
+    await _recorder.start(path);
+    _segmentStartedAt = DateTime.now();
+    _rolloverTimer?.cancel();
+    _rolloverTimer = Timer(segmentDuration, () => unawaited(_rollover()));
+  }
+
+  Future<void> _rollover() async {
+    if (_rollingOver || _session == null) return;
+    _rollingOver = true;
+    try {
+      await _finishSegment();
+      await _startSegment();
+    } finally {
+      _rollingOver = false;
+    }
+  }
+
+  Future<void> _finishSegment() async {
+    final current = _session;
+    final startedAt = _segmentStartedAt;
+    if (current == null || startedAt == null || !await _recorder.isRecording()) return;
+    final path = await _recorder.stop();
+    if (path == null) throw const AudioRecordingException('audio_file_not_finalized');
+    final elapsed = DateTime.now().difference(startedAt).inSeconds;
+    final duration = elapsed < 1
+        ? 1
+        : (elapsed > segmentDuration.inSeconds ? segmentDuration.inSeconds : elapsed);
+    final updated = current.copyWith(segments: [
+      ...current.segments,
+      RecordingSegment(index: current.segments.length, localAudioPath: path, durationSeconds: duration),
+    ]);
+    _session = updated;
+    await _store.save(updated);
+    debugPrint('AUDIO_RECORDING: local_file_saved path=$path');
+  }
+
+  Future<RecordingSession> stop() async {
+    _rolloverTimer?.cancel();
+    while (_rollingOver) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    await _finishSegment();
+    final current = _session;
+    if (current == null) throw const AudioRecordingException('no_active_recording');
+    final completed = current.copyWith(status: RecordingSessionStatus.pendingTranscription);
+    _session = completed;
+    await _store.save(completed);
+    debugPrint('AUDIO_RECORDING: stopped duration_seconds=${completed.durationSeconds}');
+    return completed;
+  }
+}
+
+class AudioRecordingException implements Exception {
+  const AudioRecordingException(this.code);
+  final String code;
+}

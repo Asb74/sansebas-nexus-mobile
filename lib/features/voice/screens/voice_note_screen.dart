@@ -438,13 +438,14 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
     debugPrint('LISTEN_START step=$step session=$currentSessionId locale=${localeId ?? 'default'}');
 
     String? path;
-    if (_attachOriginalAudio) {
-      final permissionGranted = await _audioRecorder.hasPermission();
-      if (permissionGranted) {
-        final directory = await getTemporaryDirectory();
-        path = '${directory.path}/${_uuid.v4()}.m4a';
-        await _audioRecorder.start(const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 128000, sampleRate: 44100), path: path);
-      }
+    final permissionGranted = await _audioRecorder.hasPermission();
+    if (permissionGranted) {
+      final documents = await getApplicationDocumentsDirectory();
+      final directory = Directory('${documents.path}/recordings/$_draftMobileNoteId');
+      await directory.create(recursive: true);
+      path = '${directory.path}/${_uuid.v4()}.m4a';
+      await _audioRecorder.start(const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 128000, sampleRate: 44100), path: path);
+      debugPrint('AUDIO_RECORDING: started');
     }
 
     final completer = Completer<String?>();
@@ -582,7 +583,11 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
   }
 
   Future<void> _stopAudioRecorderIfNeeded() async {
-    if (await _audioRecorder.isRecording()) await _audioRecorder.stop();
+    if (await _audioRecorder.isRecording()) {
+      final path = await _audioRecorder.stop();
+      debugPrint('AUDIO_RECORDING: stopped duration_seconds=${_recordingDuration.inSeconds}');
+      if (path != null) debugPrint('AUDIO_RECORDING: local_file_saved path=$path');
+    }
   }
 
 
@@ -820,6 +825,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         type: type.name,
         tags: const [],
         content: _isActionMode ? _actionDescriptionController.text.trim() : content,
+        summary: '',
+        sourceType: 'audio',
         source: _isActionMode ? 'voice_action' : 'voice_dictation',
         createdAt: now,
         updatedAt: now,
@@ -828,6 +835,9 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
         deviceId: await _firebaseSyncService.readDeviceId(),
         attachmentsCount: attachments.length,
         voiceTranscription: _isActionMode ? _actionDescriptionController.text.trim() : content,
+        durationSeconds: _audioDurationSeconds,
+        transcriptionStatus: 'completed',
+        audioStorageStatus: _audioPath == null ? 'deleted' : 'local',
         captureMode: _isActionMode ? 'voice_action' : 'voice_note',
         isActionCandidate: _isActionMode,
         actionStatus: _isActionMode ? (actionStatusOverride ?? 'pending_review') : null,
@@ -919,9 +929,11 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
       };
 
   String _formatDuration(Duration duration) {
+    final hours = duration.inHours;
     final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
     final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
-    return '$minutes:$seconds';
+    if (hours == 0) return '$minutes:$seconds';
+    return '${hours.toString().padLeft(2, '0')}:$minutes:$seconds';
   }
 
   @override

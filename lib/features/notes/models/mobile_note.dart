@@ -14,6 +14,8 @@ class MobileNote {
     required this.type,
     required this.tags,
     required this.content,
+    this.summary = '',
+    this.sourceType,
     this.source = 'mobile',
     required this.createdAt,
     required this.updatedAt,
@@ -39,6 +41,10 @@ class MobileNote {
     this.importedAt,
     this.importedByDesktopId,
     this.errorMessage,
+    this.durationSeconds,
+    this.transcriptionStatus,
+    this.audioStorageStatus,
+    this.audioStoragePath,
   });
 
   final String mobileNoteId;
@@ -51,6 +57,8 @@ class MobileNote {
   final String type;
   final List<String> tags;
   final String content;
+  final String summary;
+  final String? sourceType;
   final String source;
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -76,6 +84,10 @@ class MobileNote {
   final DateTime? importedAt;
   final String? importedByDesktopId;
   final String? errorMessage;
+  final int? durationSeconds;
+  final String? transcriptionStatus;
+  final String? audioStorageStatus;
+  final String? audioStoragePath;
 
   bool get hasAttachments => attachmentsCount > 0;
   bool get hasLocation => latitude != null && longitude != null;
@@ -95,6 +107,8 @@ class MobileNote {
       'type': type,
       'tags': tags,
       'content': content,
+      'summary': summary,
+      'source_type': sourceType,
       'source': source,
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
@@ -118,6 +132,10 @@ class MobileNote {
       'imported_at': importedAt?.toIso8601String(),
       'imported_by_desktop_id': importedByDesktopId,
       'error_message': errorMessage,
+      'duration_seconds': durationSeconds,
+      'transcription_status': transcriptionStatus,
+      'audio_storage_status': audioStorageStatus,
+      'audio_storage_path': audioStoragePath,
     };
   }
 
@@ -133,6 +151,8 @@ class MobileNote {
       type: _readString(map, 'type'),
       tags: List<String>.from(map['tags'] as List? ?? const []),
       content: _readString(map, 'content'),
+      summary: _readString(map, 'summary'),
+      sourceType: _readNullableString(map['source_type'] ?? map['sourceType']),
       source: _readString(map, 'source').isEmpty
           ? 'mobile'
           : _readString(map, 'source'),
@@ -173,6 +193,10 @@ class MobileNote {
           _readNullableString(map['importedByDesktopId']),
       errorMessage: _readNullableString(map['error_message']) ??
           _readNullableString(map['errorMessage']),
+      durationSeconds: _readNullableInt(map['duration_seconds'] ?? map['durationSeconds']),
+      transcriptionStatus: _readNullableString(map['transcription_status'] ?? map['transcriptionStatus']),
+      audioStorageStatus: _readNullableString(map['audio_storage_status'] ?? map['audioStorageStatus']),
+      audioStoragePath: _readNullableString(map['audio_storage_path'] ?? map['audioStoragePath']),
     );
   }
 
@@ -188,6 +212,8 @@ class MobileNote {
     String? type,
     List<String>? tags,
     String? content,
+    String? summary,
+    String? sourceType,
     String? source,
     DateTime? createdAt,
     DateTime? updatedAt,
@@ -213,6 +239,10 @@ class MobileNote {
     DateTime? importedAt,
     String? importedByDesktopId,
     String? errorMessage,
+    int? durationSeconds,
+    String? transcriptionStatus,
+    String? audioStorageStatus,
+    String? audioStoragePath,
   }) {
     return MobileNote(
       mobileNoteId: mobileNoteId ?? this.mobileNoteId,
@@ -225,6 +255,8 @@ class MobileNote {
       type: type ?? this.type,
       tags: tags ?? this.tags,
       content: content ?? this.content,
+      summary: summary ?? this.summary,
+      sourceType: sourceType ?? this.sourceType,
       source: source ?? this.source,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
@@ -250,6 +282,10 @@ class MobileNote {
       importedAt: importedAt ?? this.importedAt,
       importedByDesktopId: importedByDesktopId ?? this.importedByDesktopId,
       errorMessage: errorMessage ?? this.errorMessage,
+      durationSeconds: durationSeconds ?? this.durationSeconds,
+      transcriptionStatus: transcriptionStatus ?? this.transcriptionStatus,
+      audioStorageStatus: audioStorageStatus ?? this.audioStorageStatus,
+      audioStoragePath: audioStoragePath ?? this.audioStoragePath,
     );
   }
 
@@ -272,6 +308,13 @@ class MobileNote {
     if (value is int) return value;
     if (value is num) return value.toInt();
     return 0;
+  }
+
+  static int? _readNullableInt(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value);
+    return null;
   }
 
   static double? _readNullableDouble(dynamic value) {

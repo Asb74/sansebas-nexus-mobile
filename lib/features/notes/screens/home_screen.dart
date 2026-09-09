@@ -2,9 +2,65 @@ import 'package:flutter/material.dart';
 
 import '../../../app/routes.dart';
 import '../../../core/theme/app_colors.dart';
+import '../../voice/models/recording_session.dart';
+import '../../voice/services/recording_session_store.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  final _recordingStore = RecordingSessionStore();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _offerPendingRecording());
+  }
+
+  Future<void> _offerPendingRecording() async {
+    final pending = await _recordingStore.pendingSessions();
+    if (!mounted || pending.isEmpty) return;
+    final session = pending.first;
+    final action = await showDialog<_RecoveryAction>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Grabación pendiente'),
+        content: const Text('Se encontró una grabación pendiente. El audio está guardado en este dispositivo.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, _RecoveryAction.delete), child: const Text('Eliminar')),
+          TextButton(onPressed: () => Navigator.pop(context, _RecoveryAction.keep), child: const Text('Conservar para después')),
+          FilledButton(onPressed: () => Navigator.pop(context, _RecoveryAction.continueProcessing), child: const Text('Continuar procesamiento')),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (action == _RecoveryAction.delete) {
+      await _confirmDelete(session);
+    } else if (action == _RecoveryAction.continueProcessing) {
+      await Navigator.pushNamed(context, AppRoutes.voiceNote, arguments: session.id);
+    }
+  }
+
+  Future<void> _confirmDelete(RecordingSession session) async {
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('¿Eliminar grabación?'),
+            content: const Text('Esta acción elimina la copia local y no se puede deshacer.'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancelar')),
+              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Eliminar')),
+            ],
+          ),
+        ) ??
+        false;
+    if (confirmed) await _recordingStore.deleteSession(session);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -97,3 +153,5 @@ class HomeScreen extends StatelessWidget {
     );
   }
 }
+
+enum _RecoveryAction { continueProcessing, keep, delete }
