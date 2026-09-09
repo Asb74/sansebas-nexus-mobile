@@ -71,6 +71,7 @@ class FirebaseSyncService {
 
     try {
       await docRef.set(noteToSave.toMap());
+      debugPrint('FIRESTORE_NOTE: final_sync completed note_id=${noteToSave.mobileNoteId}');
     } on FirebaseException catch (error) {
       debugPrint('Error exacto Firestore al guardar nota: ${error.code} ${error.message}');
       if (error.code == 'permission-denied') {
