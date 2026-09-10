@@ -7,6 +7,15 @@ import 'package:uuid/uuid.dart';
 import '../models/recording_session.dart';
 import 'recording_session_store.dart';
 
+String formatAudioDuration(Duration duration) {
+  final hours = duration.inHours;
+  final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+  return hours > 0
+      ? '${hours.toString().padLeft(2, '0')}:$minutes:$seconds'
+      : '$minutes:$seconds';
+}
+
 class AudioSegmentationPolicy {
   const AudioSegmentationPolicy({
     this.segmentDuration = const Duration(minutes: 5),

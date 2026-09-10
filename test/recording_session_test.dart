@@ -94,4 +94,33 @@ void main() {
     expect(policy.estimatedSegmentBytes, lessThan(20 * 1024 * 1024));
     expect(policy.isWithinSafeThreshold, isTrue);
   });
+
+  test('formats the local recording timer below and above one hour', () {
+    expect(formatAudioDuration(const Duration(seconds: 27)), '00:27');
+    expect(formatAudioDuration(const Duration(hours: 1, minutes: 12, seconds: 34)), '01:12:34');
+  });
+
+  test('commits recognized text to the local session in segment order', () async {
+    final session = RecordingSession(
+      id: 'recognized',
+      startedAt: DateTime.utc(2026, 9, 10),
+      status: RecordingSessionStatus.pendingTranscription,
+      segments: const [
+        RecordingSegment(index: 0, localAudioPath: 'part-1', durationSeconds: 27),
+      ],
+    );
+    final service = AudioTranscriptionService(
+      store: store,
+      transcriber: _FakeTranscriber(const {}),
+    );
+
+    final result = await service.completeWithRecognizedText(
+      session,
+      'Hablar con Antonio mañana.',
+    );
+
+    expect(result.status, RecordingSessionStatus.ready);
+    expect(result.transcription, 'Hablar con Antonio mañana.');
+    expect((await store.read('recognized'))!.transcription, result.transcription);
+  });
 }
