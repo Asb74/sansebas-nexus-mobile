@@ -1,7 +1,8 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show FontFeature;
 
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 
@@ -18,6 +19,12 @@ import '../services/document_scan_service.dart';
 import '../services/firebase_sync_service.dart';
 import '../widgets/attachment_action_button.dart';
 import '../widgets/note_text_field.dart';
+import '../../voice/models/recording_session.dart';
+import '../../voice/services/audio_transcription_service.dart';
+import '../../voice/services/recording_session_store.dart';
+import '../../voice/services/safe_audio_recorder.dart';
+
+enum _AudioCaptureStatus { idle, recording, transcribing, completed, failed }
 
 class NewNoteScreen extends StatefulWidget {
   const NewNoteScreen({super.key});
@@ -36,28 +43,53 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   final _documentScanService = DocumentScanService();
   final _uuid = const Uuid();
   final _audioRecorder = AudioRecorder();
+  final _recordingStore = RecordingSessionStore();
+  late final SafeAudioRecorder _safeAudioRecorder;
+  late final LiveAudioTranscriber _liveAudioTranscriber;
+  late final HttpAudioSegmentTranscriber _fileAudioTranscriber;
+  late final AudioTranscriptionService _audioTranscriptionService;
 
   late final Future<MasterData> _mastersFuture;
   AreaMaster? _selectedArea;
   TopicMaster? _selectedTopic;
   NoteTypeMaster? _selectedType;
   bool _isSaving = false;
-  bool _isRecordingAudio = false;
-  DateTime? _audioStartedAt;
+  _AudioCaptureStatus _audioStatus = _AudioCaptureStatus.idle;
+  final Stopwatch _audioStopwatch = Stopwatch();
+  Timer? _audioTimer;
+  Duration _audioElapsed = Duration.zero;
+  RecordingSession? _lastRecordingSession;
   late String _draftMobileNoteId;
   final List<MobileAttachment> _pendingAttachments = <MobileAttachment>[];
+
+  bool get _isAudioBusy =>
+      _audioStatus == _AudioCaptureStatus.recording ||
+      _audioStatus == _AudioCaptureStatus.transcribing;
 
   @override
   void initState() {
     super.initState();
     _mastersFuture = _masterService.loadMasters();
     _draftMobileNoteId = _uuid.v4();
+    _safeAudioRecorder = SafeAudioRecorder(
+      store: _recordingStore,
+      recorder: RecordAudioRecorderAdapter(_audioRecorder),
+    );
+    _liveAudioTranscriber = LiveAudioTranscriber();
+    _fileAudioTranscriber = HttpAudioSegmentTranscriber();
+    _audioTranscriptionService = AudioTranscriptionService(
+      store: _recordingStore,
+      transcriber: _fileAudioTranscriber,
+    );
   }
 
   @override
   void dispose() {
     _titleController.dispose();
     _tagsController.dispose();
+    _audioTimer?.cancel();
+    _audioStopwatch.stop();
+    unawaited(_liveAudioTranscriber.cancel());
     _audioRecorder.dispose();
     _contentController.dispose();
     super.dispose();
@@ -82,26 +114,31 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
 
   Future<void> _toggleAudioRecording() async {
     if (_isSaving) return;
-    if (_isRecordingAudio) {
+    if (_audioStatus == _AudioCaptureStatus.recording) {
       await _stopAudioRecording();
       return;
     }
 
     try {
-      if (!await _audioRecorder.hasPermission()) {
-        _showValidationMessage('Permiso de micrófono denegado.');
-        return;
+      await _safeAudioRecorder.start();
+      try {
+        await _liveAudioTranscriber.start();
+      } catch (error) {
+        // Keep recording safely: a configured file endpoint can still
+        // transcribe after stop, otherwise the recoverable error UI is shown.
+        debugPrint('No se pudo iniciar el reconocimiento en vivo: $error');
       }
-      final directory = await getTemporaryDirectory();
-      final path = '${directory.path}/${_uuid.v4()}.m4a';
-      await _audioRecorder.start(
-        const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 128000, sampleRate: 44100),
-        path: path,
-      );
       if (!mounted) return;
+      _audioStopwatch
+        ..reset()
+        ..start();
+      _audioTimer?.cancel();
+      _audioTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() => _audioElapsed = _audioStopwatch.elapsed);
+      });
       setState(() {
-        _isRecordingAudio = true;
-        _audioStartedAt = DateTime.now();
+        _audioStatus = _AudioCaptureStatus.recording;
+        _audioElapsed = Duration.zero;
       });
     } catch (error) {
       debugPrint('No se pudo iniciar la grabación. Error exacto: $error');
@@ -111,33 +148,83 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   }
 
   Future<void> _stopAudioRecording() async {
+    _audioTimer?.cancel();
+    _audioStopwatch.stop();
+    if (mounted) {
+      setState(() {
+        _audioElapsed = _audioStopwatch.elapsed;
+        _audioStatus = _AudioCaptureStatus.transcribing;
+      });
+    }
     try {
-      final startedAt = _audioStartedAt;
-      final path = await _audioRecorder.stop();
+      // Stop finalizes every local M4A before recognition is committed.
+      final session = await _safeAudioRecorder.stop();
+      _lastRecordingSession = session;
+      await _addAudioAttachments(session);
+      String? capturedText;
+      try {
+        capturedText = await _liveAudioTranscriber.stop();
+      } on AudioTranscriptionException {
+        if (!_fileAudioTranscriber.isConfigured) rethrow;
+      }
+      final completed = _fileAudioTranscriber.isConfigured
+          ? await _audioTranscriptionService.transcribe(session)
+          : await _audioTranscriptionService.completeWithRecognizedText(session, capturedText!);
+      if (completed.status != RecordingSessionStatus.ready) {
+        throw const AudioTranscriptionException('recoverable_transcription_error');
+      }
       if (!mounted) return;
       setState(() {
-        _isRecordingAudio = false;
-        _audioStartedAt = null;
+        _lastRecordingSession = completed;
+        _audioStatus = _AudioCaptureStatus.completed;
+        _appendTranscriptionToContent(completed.transcription);
       });
-      if (path == null) return;
-      final durationSeconds = startedAt == null ? null : DateTime.now().difference(startedAt).inSeconds;
+      _showValidationMessage('✓ Transcripción completada');
+    } catch (error) {
+      debugPrint('No se pudo completar la transcripción. Error exacto: $error');
+      if (!mounted) return;
+      setState(() => _audioStatus = _AudioCaptureStatus.failed);
+    }
+  }
+
+  Future<void> _addAudioAttachments(RecordingSession session) async {
+    for (final segment in session.segments) {
       final attachment = await _attachmentService.buildMobileAttachmentFromPath(
-        path: path,
+        path: segment.localAudioPath,
         mobileNoteId: _draftMobileNoteId,
         captureMode: 'audio',
-        filename: 'audio_${DateTime.now().millisecondsSinceEpoch}.m4a',
+        filename: 'audio_${DateTime.now().millisecondsSinceEpoch}_${segment.index + 1}.m4a',
         mimeType: 'audio/mp4',
-        durationSeconds: durationSeconds,
+        durationSeconds: segment.durationSeconds,
       );
+      if (mounted) setState(() => _pendingAttachments.add(attachment));
+    }
+  }
+
+  void _appendTranscriptionToContent(String transcription) {
+    final previous = _contentController.text.trim();
+    _contentController.text = previous.isEmpty ? transcription.trim() : '$previous\n\n${transcription.trim()}';
+    _contentController.selection = TextSelection.collapsed(offset: _contentController.text.length);
+  }
+
+  Future<void> _retryTranscription() async {
+    final session = _lastRecordingSession;
+    if (session == null) return;
+    setState(() => _audioStatus = _AudioCaptureStatus.transcribing);
+    try {
+      final result = await _audioTranscriptionService.transcribe(session);
       if (!mounted) return;
-      setState(() => _pendingAttachments.add(attachment));
-    } on AttachmentException catch (error) {
-      if (!mounted) return;
-      _showValidationMessage(error.message);
-    } catch (error) {
-      debugPrint('No se pudo detener la grabación. Error exacto: $error');
-      if (!mounted) return;
-      _showValidationMessage('No se pudo adjuntar el audio.');
+      if (result.status != RecordingSessionStatus.ready || result.transcription.isEmpty) {
+        setState(() => _audioStatus = _AudioCaptureStatus.failed);
+        return;
+      }
+      setState(() {
+        _lastRecordingSession = result;
+        _audioStatus = _AudioCaptureStatus.completed;
+        _appendTranscriptionToContent(result.transcription);
+      });
+    } catch (_) {
+      if (mounted) setState(() => _audioStatus = _AudioCaptureStatus.failed);
     }
   }
 
@@ -286,6 +373,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       type: type.name,
       tags: _parseTags(),
       content: content,
+      summary: '',
       source: 'mobile',
       createdAt: now,
       updatedAt: now,
@@ -293,6 +381,11 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       userId: uid,
       deviceId: await _firebaseSyncService.readDeviceId(),
       attachmentsCount: _pendingAttachments.length,
+      durationSeconds: _lastRecordingSession?.durationSeconds,
+      transcriptionStatus: _lastRecordingSession == null
+          ? null
+          : (_audioStatus == _AudioCaptureStatus.completed ? 'completed' : 'pending_transcription'),
+      audioStorageStatus: _lastRecordingSession == null ? null : 'local',
     );
 
     try {
@@ -446,8 +539,8 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
                           ),
                           AttachmentActionButton(
                             icon: Icons.mic_none_outlined,
-                            label: _isRecordingAudio ? 'Parar audio' : 'Audio',
-                            onPressed: _isSaving ? null : _toggleAudioRecording,
+                            label: 'Audio',
+                            onPressed: _isSaving || _isAudioBusy ? null : _toggleAudioRecording,
                           ),
                           AttachmentActionButton(
                             icon: Icons.attach_file_outlined,
@@ -456,6 +549,15 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
                           ),
                         ],
                       ),
+                      if (_audioStatus != _AudioCaptureStatus.idle) ...[
+                        const SizedBox(height: 16),
+                        _AudioRecordingPanel(
+                          status: _audioStatus,
+                          formattedElapsed: formatAudioDuration(_audioElapsed),
+                          onStop: _audioStatus == _AudioCaptureStatus.recording ? _stopAudioRecording : null,
+                          onRetry: _audioStatus == _AudioCaptureStatus.failed ? _retryTranscription : null,
+                        ),
+                      ],
                       const SizedBox(height: 16),
                       _AttachmentsPreview(
                         attachments: _pendingAttachments,
@@ -463,7 +565,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
                       ),
                       const SizedBox(height: 32),
                       FilledButton.icon(
-                        onPressed: _isSaving ? null : _saveNote,
+                        onPressed: _isSaving || _isAudioBusy ? null : _saveNote,
                         icon: _isSaving
                             ? const SizedBox.square(
                                 dimension: 18,
@@ -490,6 +592,87 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   }
 }
 
+class _AudioRecordingPanel extends StatelessWidget {
+  const _AudioRecordingPanel({
+    required this.status,
+    required this.formattedElapsed,
+    required this.onStop,
+    required this.onRetry,
+  });
+
+  final _AudioCaptureStatus status;
+  final String formattedElapsed;
+  final VoidCallback? onStop;
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final isRecording = status == _AudioCaptureStatus.recording;
+    final isTranscribing = status == _AudioCaptureStatus.transcribing;
+    return Semantics(
+      liveRegion: true,
+      label: isRecording ? 'Grabando, $formattedElapsed' : null,
+      child: Card(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              if (isRecording) ...[
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.circle, color: Colors.red, size: 13),
+                    const SizedBox(width: 8),
+                    Text('Grabando', style: Theme.of(context).textTheme.titleMedium),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  formattedElapsed,
+                  key: const Key('audio-recording-timer'),
+                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  key: const Key('stop-audio-recording'),
+                  onPressed: onStop,
+                  icon: const Icon(Icons.stop),
+                  label: const Text('Detener'),
+                ),
+              ] else if (isTranscribing) ...[
+                const CircularProgressIndicator(),
+                const SizedBox(height: 12),
+                const Text('Transcribiendo audio...'),
+              ] else if (status == _AudioCaptureStatus.completed) ...[
+                const Icon(Icons.check_circle, color: Colors.green),
+                const SizedBox(height: 8),
+                const Text('Transcripción completada'),
+              ] else ...[
+                const Icon(Icons.error_outline, color: Colors.orange),
+                const SizedBox(height: 8),
+                const Text(
+                  'No se pudo completar la transcripción.\n\n'
+                  'La grabación está guardada y puedes volver a intentarlo.',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Reintentar transcripción'),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class _AttachmentsPreview extends StatelessWidget {
   const _AttachmentsPreview({
