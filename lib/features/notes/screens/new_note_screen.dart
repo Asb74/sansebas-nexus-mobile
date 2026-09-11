@@ -180,8 +180,11 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
         _appendTranscriptionToContent(completed.transcription);
       });
       _showValidationMessage('✓ Transcripción completada');
-    } catch (error) {
+    } catch (error, stackTrace) {
       debugPrint('No se pudo completar la transcripción. Error exacto: $error');
+      debugPrint('AUDIO_TRANSCRIPTION: exception type=${error.runtimeType}');
+      debugPrint('AUDIO_TRANSCRIPTION: exception message=$error');
+      debugPrint('AUDIO_TRANSCRIPTION: stacktrace=$stackTrace');
       if (!mounted) return;
       setState(() => _audioStatus = _AudioCaptureStatus.failed);
     }
@@ -202,14 +205,25 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   }
 
   void _appendTranscriptionToContent(String transcription) {
+    debugPrint('NOTE_CONTENT: transcription applied chars=${transcription.trim().length}');
     final previous = _contentController.text.trim();
     _contentController.text = previous.isEmpty ? transcription.trim() : '$previous\n\n${transcription.trim()}';
     _contentController.selection = TextSelection.collapsed(offset: _contentController.text.length);
+    debugPrint('NOTE_CONTENT: field updated successfully');
   }
 
   Future<void> _retryTranscription() async {
     final session = _lastRecordingSession;
     if (session == null) return;
+    debugPrint('AUDIO_TRANSCRIPTION: retry requested');
+    for (final segment in session.segments) {
+      final file = File(segment.localAudioPath);
+      final exists = await file.exists();
+      final size = exists ? await file.length() : 0;
+      debugPrint('AUDIO_TRANSCRIPTION: retry path=${segment.localAudioPath}');
+      debugPrint('AUDIO_TRANSCRIPTION: retry file_exists=$exists');
+      debugPrint('AUDIO_TRANSCRIPTION: retry size_bytes=$size');
+    }
     setState(() => _audioStatus = _AudioCaptureStatus.transcribing);
     try {
       final result = await _audioTranscriptionService.transcribe(session);
@@ -223,7 +237,10 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
         _audioStatus = _AudioCaptureStatus.completed;
         _appendTranscriptionToContent(result.transcription);
       });
-    } catch (_) {
+    } catch (error, stackTrace) {
+      debugPrint('AUDIO_TRANSCRIPTION: exception type=${error.runtimeType}');
+      debugPrint('AUDIO_TRANSCRIPTION: exception message=$error');
+      debugPrint('AUDIO_TRANSCRIPTION: stacktrace=$stackTrace');
       if (mounted) setState(() => _audioStatus = _AudioCaptureStatus.failed);
     }
   }
