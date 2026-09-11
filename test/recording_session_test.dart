@@ -86,11 +86,12 @@ void main() {
     expect((await store.read('retryable'))!.status, RecordingSessionStatus.errorRecoverable);
   });
 
-  test('a recording over 25 MB is planned as safe five-minute segments', () {
+  test('a recording over 20 MB is split while smaller audio stays whole', () {
     const policy = AudioSegmentationPolicy();
     const duration = Duration(minutes: 30); // About 28.8 MB at 128 kbit/s.
 
-    expect(policy.segmentCount(duration), 6);
+    expect(policy.segmentCount(const Duration(minutes: 20)), 1);
+    expect(policy.segmentCount(duration), 2);
     expect(policy.estimatedSegmentBytes, lessThan(20 * 1024 * 1024));
     expect(policy.isWithinSafeThreshold, isTrue);
   });
@@ -100,27 +101,23 @@ void main() {
     expect(formatAudioDuration(const Duration(hours: 1, minutes: 12, seconds: 34)), '01:12:34');
   });
 
-  test('commits recognized text to the local session in segment order', () async {
-    final session = RecordingSession(
-      id: 'recognized',
-      startedAt: DateTime.utc(2026, 9, 10),
-      status: RecordingSessionStatus.pendingTranscription,
-      segments: const [
-        RecordingSegment(index: 0, localAudioPath: 'part-1', durationSeconds: 27),
-      ],
+  test('rejects a tiny file that cannot plausibly contain its duration', () {
+    expect(
+      isPlausibleAudioFileSize(durationSeconds: 28, sizeBytes: 3109),
+      isFalse,
     );
-    final service = AudioTranscriptionService(
-      store: store,
-      transcriber: _FakeTranscriber(const {}),
+    expect(
+      isPlausibleAudioFileSize(durationSeconds: 28, sizeBytes: 448000),
+      isTrue,
     );
+  });
 
-    final result = await service.completeWithRecognizedText(
-      session,
-      'Hablar con Antonio mañana.',
-    );
+  test('transcription exceptions include their real message and HTTP status', () {
+    const error = AudioTranscriptionException('Servicio no disponible', statusCode: 503);
 
-    expect(result.status, RecordingSessionStatus.ready);
-    expect(result.transcription, 'Hablar con Antonio mañana.');
-    expect((await store.read('recognized'))!.transcription, result.transcription);
+    expect(
+      error.toString(),
+      'AudioTranscriptionException: Servicio no disponible (HTTP 503)',
+    );
   });
 }

@@ -45,7 +45,6 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   final _audioRecorder = AudioRecorder();
   final _recordingStore = RecordingSessionStore();
   late final SafeAudioRecorder _safeAudioRecorder;
-  late final LiveAudioTranscriber _liveAudioTranscriber;
   late final HttpAudioSegmentTranscriber _fileAudioTranscriber;
   late final AudioTranscriptionService _audioTranscriptionService;
 
@@ -75,7 +74,6 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       store: _recordingStore,
       recorder: RecordAudioRecorderAdapter(_audioRecorder),
     );
-    _liveAudioTranscriber = LiveAudioTranscriber();
     _fileAudioTranscriber = HttpAudioSegmentTranscriber();
     _audioTranscriptionService = AudioTranscriptionService(
       store: _recordingStore,
@@ -89,7 +87,6 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
     _tagsController.dispose();
     _audioTimer?.cancel();
     _audioStopwatch.stop();
-    unawaited(_liveAudioTranscriber.cancel());
     _audioRecorder.dispose();
     _contentController.dispose();
     super.dispose();
@@ -121,13 +118,6 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
 
     try {
       await _safeAudioRecorder.start();
-      try {
-        await _liveAudioTranscriber.start();
-      } catch (error) {
-        // Keep recording safely: a configured file endpoint can still
-        // transcribe after stop, otherwise the recoverable error UI is shown.
-        debugPrint('No se pudo iniciar el reconocimiento en vivo: $error');
-      }
       if (!mounted) return;
       _audioStopwatch
         ..reset()
@@ -157,19 +147,12 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       });
     }
     try {
-      // Stop finalizes every local M4A before recognition is committed.
+      // The recorder is the only microphone consumer. This await finalizes and
+      // validates every local M4A before any HTTP transcription can start.
       final session = await _safeAudioRecorder.stop();
       _lastRecordingSession = session;
       await _addAudioAttachments(session);
-      String? capturedText;
-      try {
-        capturedText = await _liveAudioTranscriber.stop();
-      } on AudioTranscriptionException {
-        if (!_fileAudioTranscriber.isConfigured) rethrow;
-      }
-      final completed = _fileAudioTranscriber.isConfigured
-          ? await _audioTranscriptionService.transcribe(session)
-          : await _audioTranscriptionService.completeWithRecognizedText(session, capturedText!);
+      final completed = await _audioTranscriptionService.transcribe(session);
       if (completed.status != RecordingSessionStatus.ready) {
         throw const AudioTranscriptionException('recoverable_transcription_error');
       }
@@ -378,6 +361,11 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
 
     setState(() => _isSaving = true);
 
+    // Audio remains local while this flow is being verified. Other attachment
+    // types keep their existing upload behavior.
+    final uploadableAttachments = _pendingAttachments
+        .where((attachment) => attachment.captureMode != 'audio')
+        .toList(growable: false);
     final now = DateTime.now();
     final note = MobileNote(
       mobileNoteId: _draftMobileNoteId,
@@ -394,10 +382,10 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       source: 'mobile',
       createdAt: now,
       updatedAt: now,
-      syncStatus: _pendingAttachments.isEmpty ? SyncStatus.uploaded : SyncStatus.pending,
+      syncStatus: uploadableAttachments.isEmpty ? SyncStatus.uploaded : SyncStatus.pending,
       userId: uid,
       deviceId: await _firebaseSyncService.readDeviceId(),
-      attachmentsCount: _pendingAttachments.length,
+      attachmentsCount: uploadableAttachments.length,
       durationSeconds: _lastRecordingSession?.durationSeconds,
       transcriptionStatus: _lastRecordingSession == null
           ? null
@@ -406,12 +394,12 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
     );
 
     try {
-      if (_pendingAttachments.isEmpty) {
+      if (uploadableAttachments.isEmpty) {
         await _firebaseSyncService.createTextNote(note);
       } else {
         await _firebaseSyncService.createNoteWithAttachments(
           note: note,
-          attachments: List<MobileAttachment>.unmodifiable(_pendingAttachments),
+          attachments: uploadableAttachments,
         );
       }
       if (!mounted) return;

@@ -3,10 +3,6 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:mime/mime.dart';
-import 'package:speech_to_text/speech_recognition_error.dart';
-import 'package:speech_to_text/speech_recognition_result.dart';
-import 'package:speech_to_text/speech_to_text.dart';
-
 import '../models/recording_session.dart';
 import 'recording_session_store.dart';
 
@@ -14,82 +10,15 @@ abstract interface class AudioSegmentTranscriber {
   Future<String> transcribe(String localAudioPath);
 }
 
-/// Captures the words recognized by Android/iOS while the original audio is
-/// being written locally. No partial result is persisted or sent to Firestore.
-class LiveAudioTranscriber {
-  LiveAudioTranscriber({SpeechToText? speech}) : _speech = speech ?? SpeechToText();
-
-  final SpeechToText _speech;
-  String _recognizedText = '';
-  String? _error;
-
-  String get recognizedText => _recognizedText.trim();
-  String? get error => _error;
-
-  Future<bool> start() async {
-    _recognizedText = '';
-    _error = null;
-    final available = await _speech.initialize(
-      onError: _onError,
-      debugLogging: kDebugMode,
-    );
-    if (!available) {
-      _error = 'speech_recognition_unavailable';
-      return false;
-    }
-
-    final localeId = await _preferredSpanishLocaleId();
-    await _speech.listen(
-      onResult: _onResult,
-      listenMode: ListenMode.dictation,
-      partialResults: true,
-      listenFor: const Duration(hours: 1),
-      pauseFor: const Duration(seconds: 30),
-      localeId: localeId,
-    );
-    return true;
-  }
-
-  Future<String> stop() async {
-    await _speech.stop();
-    // Give the platform callback carrying the final result a chance to arrive.
-    await Future<void>.delayed(const Duration(milliseconds: 250));
-    if (_error != null && recognizedText.isEmpty) {
-      throw AudioTranscriptionException(_error!);
-    }
-    if (recognizedText.isEmpty) {
-      throw const AudioTranscriptionException('empty_transcription');
-    }
-    return recognizedText;
-  }
-
-  Future<void> cancel() => _speech.cancel();
-
-  void _onResult(SpeechRecognitionResult result) {
-    final text = result.recognizedWords.trim();
-    if (text.isNotEmpty) _recognizedText = text;
-  }
-
-  void _onError(SpeechRecognitionError error) {
-    _error = error.errorMsg;
-    debugPrint('AUDIO_TRANSCRIPTION: recognition_error ${error.errorMsg}');
-  }
-
-  Future<String?> _preferredSpanishLocaleId() async {
-    final locales = await _speech.locales();
-    for (final locale in locales) {
-      if (locale.localeId == 'es_ES' || locale.localeId == 'es-ES') return locale.localeId;
-    }
-    for (final locale in locales) {
-      if (locale.localeId.toLowerCase().startsWith('es')) return locale.localeId;
-    }
-    return null;
-  }
-}
-
 class AudioTranscriptionException implements Exception {
-  const AudioTranscriptionException(this.code);
-  final String code;
+  const AudioTranscriptionException(this.message, {this.statusCode});
+
+  final String message;
+  final int? statusCode;
+
+  @override
+  String toString() => 'AudioTranscriptionException: $message'
+      '${statusCode == null ? '' : ' (HTTP $statusCode)'}';
 }
 
 /// Multipart client for the project's transcription endpoint. The URL is
@@ -113,6 +42,10 @@ class HttpAudioSegmentTranscriber implements AudioSegmentTranscriber {
   @override
   Future<String> transcribe(String localAudioPath) async {
     if (!isConfigured) {
+      debugPrint(
+        'AUDIO_TRANSCRIPTION: request not started '
+        'reason=transcription_endpoint_not_configured',
+      );
       throw const AudioTranscriptionException('transcription_endpoint_not_configured');
     }
     final file = File(localAudioPath);
@@ -127,7 +60,9 @@ class HttpAudioSegmentTranscriber implements AudioSegmentTranscriber {
     debugPrint('AUDIO_TRANSCRIPTION: extension=$extension');
     debugPrint('AUDIO_TRANSCRIPTION: mime_type=$mimeType');
     if (!exists || size == 0) {
-      debugPrint('AUDIO_TRANSCRIPTION: invalid local file');
+      debugPrint(
+        'AUDIO_TRANSCRIPTION: request not started reason=local_audio_invalid',
+      );
       throw const AudioTranscriptionException('local_audio_invalid');
     }
 
@@ -158,7 +93,10 @@ class HttpAudioSegmentTranscriber implements AudioSegmentTranscriber {
       debugPrint('AUDIO_TRANSCRIPTION: response content_type=${response.headers.contentType?.mimeType ?? 'unknown'}');
       debugPrint('AUDIO_TRANSCRIPTION: response body preview=${_safeBodyPreview(body)}');
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw AudioTranscriptionException('http_${response.statusCode}');
+        throw AudioTranscriptionException(
+          'El servicio de transcripción devolvió un error',
+          statusCode: response.statusCode,
+        );
       }
       final decoded = jsonDecode(body);
       final text = decoded is Map ? decoded['text']?.toString().trim() : null;
@@ -219,30 +157,6 @@ class AudioTranscriptionService {
   final RecordingSessionStore _store;
   final AudioSegmentTranscriber _transcriber;
 
-  /// Associates an in-memory recognition result with the safely finalized
-  /// local recording. The manifest is local and remains retryable.
-  Future<RecordingSession> completeWithRecognizedText(
-    RecordingSession session,
-    String transcription,
-  ) async {
-    final ordered = session.segments.toList()..sort((a, b) => a.index.compareTo(b.index));
-    if (ordered.isEmpty || transcription.trim().isEmpty) {
-      throw const AudioTranscriptionException('empty_transcription');
-    }
-    ordered[0] = ordered[0].copyWith(transcription: transcription.trim());
-    for (var index = 1; index < ordered.length; index++) {
-      ordered[index] = ordered[index].copyWith(transcription: '');
-    }
-    final completed = session.copyWith(
-      status: RecordingSessionStatus.ready,
-      segments: List.unmodifiable(ordered),
-      clearError: true,
-    );
-    await _store.save(completed);
-    debugPrint('AUDIO_TRANSCRIPTION: completed chars=${completed.transcription.length}');
-    return completed;
-  }
-
   Future<RecordingSession> transcribe(RecordingSession session) async {
     var current = session.copyWith(status: RecordingSessionStatus.transcribing, clearError: true);
     await _store.save(current);
@@ -267,7 +181,7 @@ class AudioTranscriptionService {
     } catch (error, stackTrace) {
       current = current.copyWith(
         status: RecordingSessionStatus.errorRecoverable,
-        errorMessage: error.runtimeType.toString(),
+        errorMessage: error.toString(),
       );
       await _store.save(current);
       debugPrint('AUDIO_TRANSCRIPTION: recoverable_error type=${error.runtimeType}');

@@ -19,7 +19,7 @@ String formatAudioDuration(Duration duration) {
 
 class AudioSegmentationPolicy {
   const AudioSegmentationPolicy({
-    this.segmentDuration = const Duration(minutes: 5),
+    this.segmentDuration = const Duration(minutes: 21),
     this.bitsPerSecond = 128000,
     this.safeBytes = 20 * 1024 * 1024,
   });
@@ -72,14 +72,17 @@ const _audioCodec = 'aacLc';
 const _audioMimeType = 'audio/mp4';
 const _audioSampleRate = 44100;
 const _audioBitRate = 128000;
+const _minimumAudioBytes = 1024;
+const _minimumAudioBytesPerSecond = 512;
 
-/// Records a voice note into bounded local files. Five minutes of 128-kbit AAC
-/// is well below the 20 MB safe threshold, so no large file is sent upstream.
+/// Records a voice note into bounded local files. Twenty-one minutes of
+/// 128-kbit AAC remains below 20 MiB. Normal recordings are therefore sent as
+/// one complete file, while longer recordings retain the rollover strategy.
 class SafeAudioRecorder {
   SafeAudioRecorder({
     required RecordingSessionStore store,
     required AudioRecorderAdapter recorder,
-    this.segmentDuration = const Duration(minutes: 5),
+    this.segmentDuration = const Duration(minutes: 21),
     Uuid uuid = const Uuid(),
   })  : _store = store,
         _recorder = recorder,
@@ -167,6 +170,15 @@ class SafeAudioRecorder {
     debugPrint('AUDIO_RECORDING: file_exists=$exists');
     debugPrint('AUDIO_RECORDING: file_size_bytes=$size');
     debugPrint('AUDIO_RECORDING: extension=${_extension(path)}');
+    final minimumExpectedSize = _minimumAudioBytes + duration * _minimumAudioBytesPerSecond;
+    if (!isPlausibleAudioFileSize(durationSeconds: duration, sizeBytes: size)) {
+      debugPrint(
+        'AUDIO_RECORDING: validation failed reason=audio_file_too_small '
+        'minimum_expected_bytes=$minimumExpectedSize',
+      );
+      throw const AudioRecordingException('audio_file_too_small');
+    }
+    debugPrint('AUDIO_RECORDING: validation passed');
   }
 
   Future<RecordingSession> stop() async {
@@ -201,6 +213,12 @@ class SafeAudioRecorder {
     return completed;
   }
 }
+
+bool isPlausibleAudioFileSize({
+  required int durationSeconds,
+  required int sizeBytes,
+}) =>
+    sizeBytes >= _minimumAudioBytes + durationSeconds * _minimumAudioBytesPerSecond;
 
 String _extension(String path) {
   final filename = path.split(RegExp(r'[/\\]')).last;
