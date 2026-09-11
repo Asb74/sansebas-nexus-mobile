@@ -25,10 +25,14 @@ class AudioTranscriptionException implements Exception {
 /// supplied at build time so credentials are never embedded in the app:
 /// `--dart-define=AUDIO_TRANSCRIPTION_ENDPOINT=https://…`.
 class HttpAudioSegmentTranscriber implements AudioSegmentTranscriber {
+  static const endpointEnvironmentKey = 'AUDIO_TRANSCRIPTION_ENDPOINT';
+
   HttpAudioSegmentTranscriber({
     String? endpoint,
     HttpClient? client,
-  })  : endpoint = endpoint ?? const String.fromEnvironment('AUDIO_TRANSCRIPTION_ENDPOINT'),
+  })  : endpoint =
+            (endpoint ?? const String.fromEnvironment(endpointEnvironmentKey))
+                .trim(),
         _client = client ?? HttpClient();
 
   final String endpoint;
@@ -37,7 +41,12 @@ class HttpAudioSegmentTranscriber implements AudioSegmentTranscriber {
   static const _model = 'not_specified_by_client';
   static const _multipartFieldName = 'file';
 
-  bool get isConfigured => Uri.tryParse(endpoint)?.hasScheme ?? false;
+  bool get isConfigured {
+    final uri = Uri.tryParse(endpoint);
+    return uri != null &&
+        (uri.scheme == 'https' || uri.scheme == 'http') &&
+        uri.host.isNotEmpty;
+  }
 
   @override
   Future<String> transcribe(String localAudioPath) async {
@@ -144,10 +153,23 @@ String _safeBodyPreview(String body) {
   try {
     preview = jsonEncode(safeValue(jsonDecode(body)));
   } on FormatException {
-    preview = body;
+    preview = _redactSecrets(body);
   }
   return preview.length <= 500 ? preview : '${preview.substring(0, 500)}…';
 }
+
+String _redactSecrets(String value) => value
+    .replaceAll(
+      RegExp(r'Bearer\s+[^\s,;]+', caseSensitive: false),
+      'Bearer <redacted>',
+    )
+    .replaceAll(
+      RegExp(
+        r'((?:api[_-]?key|authorization|token)\s*[:=]\s*)[^\s,;]+',
+        caseSensitive: false,
+      ),
+      r'$1<redacted>',
+    );
 
 class AudioTranscriptionService {
   AudioTranscriptionService({required RecordingSessionStore store, required AudioSegmentTranscriber transcriber})
