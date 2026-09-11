@@ -70,7 +70,9 @@ class FirebaseSyncService {
     debugPrint('Ruta Firestore usada: $notesCollection/${noteToSave.mobileNoteId}');
 
     try {
+      debugPrint('FIRESTORE_AUDIO_DEBUG: write requested stage=final_note_create');
       await docRef.set(noteToSave.toMap());
+      debugPrint('FIRESTORE_AUDIO_DEBUG: write completed stage=final_note_create');
       debugPrint('FIRESTORE_NOTE: final_sync completed note_id=${noteToSave.mobileNoteId}');
     } on FirebaseException catch (error) {
       debugPrint('Error exacto Firestore al guardar nota: ${error.code} ${error.message}');
@@ -117,7 +119,9 @@ class FirebaseSyncService {
     debugPrint('Ruta Firestore usada: $notesCollection/${noteToSave.mobileNoteId}');
 
     try {
+      debugPrint('FIRESTORE_AUDIO_DEBUG: write requested stage=initial_note_create');
       await docRef.set(noteToSave.toMap());
+      debugPrint('FIRESTORE_AUDIO_DEBUG: write completed stage=initial_note_create');
 
       for (final attachment in attachments) {
         final storageFilename = attachment.captureMode == 'document_scan' && attachment.documentFormat == 'pdf'
@@ -138,18 +142,22 @@ class FirebaseSyncService {
           importedAt: null,
           clearErrorMessage: true,
         );
+        debugPrint('FIRESTORE_AUDIO_DEBUG: write requested stage=attachment_metadata');
         await docRef
             .collection('attachments')
             .doc(uploadedAttachment.mobileAttachmentId)
             .set(uploadedAttachment.toMap()..remove('local_path'));
+        debugPrint('FIRESTORE_AUDIO_DEBUG: write completed stage=attachment_metadata');
       }
 
+      debugPrint('FIRESTORE_AUDIO_DEBUG: write requested stage=final_note_update');
       await docRef.update({
         'sync_status': SyncStatus.uploaded.value,
         'attachments_count': attachments.length,
         'updated_at': DateTime.now().toIso8601String(),
         'error_message': null,
       });
+      debugPrint('FIRESTORE_AUDIO_DEBUG: write completed stage=final_note_update');
     } on FirebaseException catch (error) {
       debugPrint('Error exacto subiendo nota/adjunto: ${error.code} ${error.message}');
       await _markNoteUploadError(docRef, error.message ?? error.toString());
@@ -173,11 +181,13 @@ class FirebaseSyncService {
 
   Future<void> _markNoteUploadError(DocumentReference<Map<String, dynamic>> docRef, String errorMessage) async {
     try {
+      debugPrint('FIRESTORE_AUDIO_DEBUG: write requested stage=upload_error');
       await docRef.set({
         'sync_status': SyncStatus.error.value,
         'updated_at': DateTime.now().toIso8601String(),
         'error_message': errorMessage,
       }, SetOptions(merge: true));
+      debugPrint('FIRESTORE_AUDIO_DEBUG: write completed stage=upload_error');
     } catch (error) {
       debugPrint('No se pudo marcar nota como error: $error');
     }
@@ -199,11 +209,13 @@ class FirebaseSyncService {
     required SyncStatus status,
     String? errorMessage,
   }) async {
+    debugPrint('FIRESTORE_AUDIO_DEBUG: write requested stage=status_update');
     await _firestore.collection(notesCollection).doc(mobileNoteId).update({
       'sync_status': status.value,
       'updated_at': DateTime.now().toIso8601String(),
       'error_message': errorMessage,
     });
+    debugPrint('FIRESTORE_AUDIO_DEBUG: write completed stage=status_update');
   }
 }
 
