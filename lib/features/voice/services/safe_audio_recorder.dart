@@ -182,10 +182,12 @@ class SafeAudioRecorder {
     _session = completed;
     await _store.save(completed);
     debugPrint('AUDIO_RECORDING: duration_seconds=${completed.durationSeconds}');
-    final segmentFiles = await Future.wait(completed.segments.map((segment) async {
-      final file = File(segment.localAudioPath);
-      return await file.exists() ? file.length() : 0;
-    }));
+    final List<int> segmentFiles = await Future.wait<int>(
+      completed.segments.map<Future<int>>((segment) async {
+        final file = File(segment.localAudioPath);
+        return await file.exists() ? await file.length() : 0;
+      }),
+    );
     final originalSize = segmentFiles.fold<int>(0, (total, size) => total + size);
     debugPrint('AUDIO_SEGMENTATION: threshold_bytes=${20 * 1024 * 1024}');
     debugPrint('AUDIO_SEGMENTATION: original_size_bytes=$originalSize');
