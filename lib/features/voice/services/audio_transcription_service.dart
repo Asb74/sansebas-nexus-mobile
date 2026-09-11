@@ -12,6 +12,8 @@ abstract interface class AudioSegmentTranscriber {
   Future<String> transcribe(String localAudioPath);
 }
 
+typedef FirebaseIdTokenProvider = Future<String?> Function();
+
 class AudioTranscriptionException implements Exception {
   const AudioTranscriptionException(this.message, {this.statusCode});
 
@@ -32,17 +34,23 @@ class HttpAudioSegmentTranscriber implements AudioSegmentTranscriber {
   HttpAudioSegmentTranscriber({
     String? endpoint,
     HttpClient? client,
-    Future<String?> Function()? idTokenProvider,
+    FirebaseIdTokenProvider? idTokenProvider,
   })  : endpoint =
             (endpoint ?? const String.fromEnvironment(endpointEnvironmentKey))
                 .trim(),
         _client = client ?? HttpClient(),
         _idTokenProvider = idTokenProvider ??
-            (() => FirebaseAuth.instance.currentUser?.getIdToken());
+            (() async {
+              final User? user = FirebaseAuth.instance.currentUser;
+              if (user == null) {
+                return null;
+              }
+              return await user.getIdToken();
+            });
 
   final String endpoint;
   final HttpClient _client;
-  final Future<String?> Function() _idTokenProvider;
+  final FirebaseIdTokenProvider _idTokenProvider;
 
   static const _model = 'not_specified_by_client';
   static const _multipartFieldName = 'file';
@@ -93,13 +101,16 @@ class HttpAudioSegmentTranscriber implements AudioSegmentTranscriber {
       debugPrint('AUDIO_TRANSCRIPTION: size_bytes=$size');
 
       final boundary = 'nexus-${DateTime.now().microsecondsSinceEpoch}';
-      final idToken = await _idTokenProvider();
+      debugPrint('AUDIO_TRANSCRIPTION: authentication=firebase');
+      final String? idToken = await _idTokenProvider();
       if (idToken == null || idToken.isEmpty) {
+        debugPrint('AUDIO_TRANSCRIPTION: firebase_user=not_authenticated');
         throw const AudioTranscriptionException(
-          'firebase_authentication_required',
+          'firebase_user_not_authenticated',
           statusCode: HttpStatus.unauthorized,
         );
       }
+      debugPrint('AUDIO_TRANSCRIPTION: firebase_user=authenticated');
       final request = await _client.postUrl(uri);
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $idToken');
       request.headers.contentType = ContentType(
@@ -107,7 +118,6 @@ class HttpAudioSegmentTranscriber implements AudioSegmentTranscriber {
         'form-data',
         parameters: {'boundary': boundary},
       );
-      debugPrint('AUDIO_TRANSCRIPTION: authentication=firebase');
       request.write('--$boundary\r\n');
       request.write(
         'Content-Disposition: form-data; name="$_multipartFieldName"; filename="$filename"\r\n',
