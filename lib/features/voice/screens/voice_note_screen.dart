@@ -951,7 +951,8 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
               _selectedArea ??= _findDefault(masters.areas, 'archivo', (area) => area.name);
               _selectedType ??= _findDefault(masters.types, _isActionMode ? 'tarea' : 'nota', (type) => type.name);
               final topics = _topicsForSelectedArea(masters);
-              if (_selectedTopic == null || !topics.contains(_selectedTopic)) {
+              if (_selectedTopic == null ||
+                  !topics.any((topic) => topic.id == _selectedTopic!.id)) {
                 _selectedTopic = _findDefault(topics, 'anotaciones', (topic) => topic.name);
               }
 
@@ -1006,18 +1007,39 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
                       NoteTextField(controller: _titleController, label: _isActionMode ? 'Título de la acción' : 'Título', hintText: _defaultTitle, textInputAction: TextInputAction.next),
                       const SizedBox(height: 16),
                       _MasterDropdown<AreaMaster>(
-                        label: 'Área', value: _selectedArea, items: masters.areas, itemLabel: (area) => area.name,
-                        onChanged: _isSaving ? null : (area) => setState(() { _selectedArea = area; _selectedTopic = null; }),
+                        label: 'Área',
+                        value: _selectedArea,
+                        items: masters.areas,
+                        itemId: (area) => area.id,
+                        itemLabel: (area) => area.name,
+                        onChanged: _isSaving
+                            ? null
+                            : (area) => setState(() {
+                                _selectedArea = area;
+                                _selectedTopic = null;
+                              }),
                       ),
                       const SizedBox(height: 16),
                       _MasterDropdown<TopicMaster>(
-                        label: 'Tema', value: _selectedTopic, items: topics, itemLabel: (topic) => topic.name,
-                        onChanged: _isSaving ? null : (topic) => setState(() => _selectedTopic = topic),
+                        label: 'Tema',
+                        value: _selectedTopic,
+                        items: topics,
+                        itemId: (topic) => topic.id,
+                        itemLabel: (topic) => topic.name,
+                        onChanged: _isSaving
+                            ? null
+                            : (topic) => setState(() => _selectedTopic = topic),
                       ),
                       const SizedBox(height: 16),
                       _MasterDropdown<NoteTypeMaster>(
-                        label: 'Tipo', value: _selectedType, items: masters.types, itemLabel: (type) => type.name,
-                        onChanged: _isSaving ? null : (type) => setState(() => _selectedType = type),
+                        label: 'Tipo',
+                        value: _selectedType,
+                        items: masters.types,
+                        itemId: (type) => type.id,
+                        itemLabel: (type) => type.name,
+                        onChanged: _isSaving
+                            ? null
+                            : (type) => setState(() => _selectedType = type),
                       ),
                       const SizedBox(height: 16),
                       if (!_isActionMode) ...[
@@ -1113,20 +1135,45 @@ class _VoiceNoteScreenState extends State<VoiceNoteScreen> {
 }
 
 class _MasterDropdown<T> extends StatelessWidget {
-  const _MasterDropdown({required this.label, required this.value, required this.items, required this.itemLabel, required this.onChanged});
+  const _MasterDropdown({
+    required this.label,
+    required this.value,
+    required this.items,
+    required this.itemId,
+    required this.itemLabel,
+    required this.onChanged,
+  });
 
   final String label;
   final T? value;
   final List<T> items;
+  final String Function(T item) itemId;
   final String Function(T item) itemLabel;
   final ValueChanged<T?>? onChanged;
 
   @override
   Widget build(BuildContext context) {
-    return DropdownButtonFormField<T>(
-      value: value,
-      items: items.map((item) => DropdownMenuItem<T>(value: item, child: Text(itemLabel(item)))).toList(growable: false),
-      onChanged: items.isEmpty ? null : onChanged,
+    final uniqueItemsById = <String, T>{
+      for (final item in items) itemId(item): item,
+    };
+    final selectedItem = value;
+    final selectedId = selectedItem == null ? null : itemId(selectedItem);
+    final selectedValue =
+        uniqueItemsById.containsKey(selectedId) ? selectedId : null;
+
+    return DropdownButtonFormField<String>(
+      value: selectedValue,
+      items: uniqueItemsById.entries
+          .map(
+            (entry) => DropdownMenuItem<String>(
+              value: entry.key,
+              child: Text(itemLabel(entry.value)),
+            ),
+          )
+          .toList(growable: false),
+      onChanged: uniqueItemsById.isEmpty || onChanged == null
+          ? null
+          : (id) => onChanged!(id == null ? null : uniqueItemsById[id]),
       decoration: InputDecoration(
         labelText: label,
         floatingLabelBehavior: FloatingLabelBehavior.always,
