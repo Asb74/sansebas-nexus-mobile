@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:mime/mime.dart';
+
 import '../models/recording_session.dart';
 import 'recording_session_store.dart';
 
@@ -30,13 +32,17 @@ class HttpAudioSegmentTranscriber implements AudioSegmentTranscriber {
   HttpAudioSegmentTranscriber({
     String? endpoint,
     HttpClient? client,
+    Future<String?> Function()? idTokenProvider,
   })  : endpoint =
             (endpoint ?? const String.fromEnvironment(endpointEnvironmentKey))
                 .trim(),
-        _client = client ?? HttpClient();
+        _client = client ?? HttpClient(),
+        _idTokenProvider = idTokenProvider ??
+            (() => FirebaseAuth.instance.currentUser?.getIdToken());
 
   final String endpoint;
   final HttpClient _client;
+  final Future<String?> Function() _idTokenProvider;
 
   static const _model = 'not_specified_by_client';
   static const _multipartFieldName = 'file';
@@ -87,8 +93,21 @@ class HttpAudioSegmentTranscriber implements AudioSegmentTranscriber {
       debugPrint('AUDIO_TRANSCRIPTION: size_bytes=$size');
 
       final boundary = 'nexus-${DateTime.now().microsecondsSinceEpoch}';
+      final idToken = await _idTokenProvider();
+      if (idToken == null || idToken.isEmpty) {
+        throw const AudioTranscriptionException(
+          'firebase_authentication_required',
+          statusCode: HttpStatus.unauthorized,
+        );
+      }
       final request = await _client.postUrl(uri);
-      request.headers.contentType = ContentType('multipart', 'form-data', parameters: {'boundary': boundary});
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $idToken');
+      request.headers.contentType = ContentType(
+        'multipart',
+        'form-data',
+        parameters: {'boundary': boundary},
+      );
+      debugPrint('AUDIO_TRANSCRIPTION: authentication=firebase');
       request.write('--$boundary\r\n');
       request.write(
         'Content-Disposition: form-data; name="$_multipartFieldName"; filename="$filename"\r\n',
@@ -112,6 +131,7 @@ class HttpAudioSegmentTranscriber implements AudioSegmentTranscriber {
       if (text == null || text.isEmpty) {
         throw const AudioTranscriptionException('empty_transcription');
       }
+      debugPrint('AUDIO_TRANSCRIPTION: completed chars=${text.length}');
       return text;
     } catch (error, stackTrace) {
       debugPrint('AUDIO_TRANSCRIPTION: exception type=${error.runtimeType}');

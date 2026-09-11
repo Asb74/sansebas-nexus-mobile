@@ -143,4 +143,26 @@ void main() {
       isFalse,
     );
   });
+
+  test('requires a current Firebase ID token before uploading audio', () async {
+    final audio = File('${temporary.path}/recording.m4a');
+    await audio.writeAsBytes(List<int>.filled(256, 1));
+    final transcriber = HttpAudioSegmentTranscriber(
+      endpoint: 'https://backend.example/transcribe',
+      idTokenProvider: () async => null,
+    );
+
+    await expectLater(
+      transcriber.transcribe(audio.path),
+      throwsA(
+        isA<AudioTranscriptionException>()
+            .having(
+              (error) => error.message,
+              'message',
+              'firebase_authentication_required',
+            )
+            .having((error) => error.statusCode, 'statusCode', 401),
+      ),
+    );
+  });
 }

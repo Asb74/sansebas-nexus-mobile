@@ -1,6 +1,6 @@
 # Configuración de la transcripción de audio
 
-## Arquitectura auditada
+## Arquitectura
 
 La aplicación crea `HttpAudioSegmentTranscriber` en `NewNoteScreen` y obtiene su
 URL exclusivamente de la constante de compilación `AUDIO_TRANSCRIPTION_ENDPOINT`.
@@ -8,12 +8,21 @@ No hay un valor predeterminado deliberadamente: una compilación que no recibe l
 constante se detiene antes de hacer la petición con
 `transcription_endpoint_not_configured`.
 
-Este repositorio no contiene Cloud Functions, otro backend, un proxy de OpenAI,
-un servicio de IA reutilizable, una configuración `.env` ni credenciales de
-OpenAI. Firebase se usa para autenticación, Firestore y Storage, pero no hay una
-función de transcripción declarada. Por tanto, no es posible deducir de forma
-segura una URL real o un modelo desde el código disponible. Tampoco se debe usar
-una URL directa de OpenAI: eso exigiría distribuir la API key en la aplicación.
+`functions/src/index.ts` implementa la Function HTTPS de segunda generación
+`transcribe` en `europe-west1`. Valida el Firebase ID token, acepta el campo
+multipart `file` (M4A, MP4, WAV o MP3, máximo 20 MB) y llama al proveedor desde
+el servidor. No utiliza Firestore.
+
+La credencial sólo se almacena como secreto `OPENAI_API_KEY` en Google Secret
+Manager. Para configurarla y desplegar:
+
+```sh
+firebase functions:secrets:set OPENAI_API_KEY
+firebase deploy --only functions:transcribe --project sansebas-nexus
+```
+
+La URL resultante es
+`https://europe-west1-sansebas-nexus.cloudfunctions.net/transcribe`.
 
 ## Configuración de una compilación
 
@@ -22,7 +31,13 @@ URL (sin claves ni tokens en la propia URL) al compilar o ejecutar:
 
 ```sh
 flutter run \
-  --dart-define=AUDIO_TRANSCRIPTION_ENDPOINT=https://<backend>/transcription
+  --dart-define=AUDIO_TRANSCRIPTION_ENDPOINT=https://europe-west1-sansebas-nexus.cloudfunctions.net/transcribe
+
+flutter build apk \
+  --dart-define=AUDIO_TRANSCRIPTION_ENDPOINT=https://europe-west1-sansebas-nexus.cloudfunctions.net/transcribe
+
+flutter build appbundle \
+  --dart-define=AUDIO_TRANSCRIPTION_ENDPOINT=https://europe-west1-sansebas-nexus.cloudfunctions.net/transcribe
 ```
 
 El endpoint debe aceptar una petición `multipart/form-data` con el archivo en el
@@ -33,11 +48,10 @@ backend y devolver JSON con la forma:
 {"text": "Texto transcrito"}
 ```
 
-El backend es responsable de elegir el modelo de transcripción y de custodiar
-sus credenciales. El cliente no envía una API key ni selecciona un modelo. Si el
-proxy real exige autenticación Firebase u otro contrato, ese contrato debe
-incorporarse cuando se facilite la implementación o especificación del proxy;
-no debe suponerse ni inventarse en la aplicación.
+El cliente obtiene bajo demanda el ID token del usuario actual de Firebase y lo
+envía como Bearer; no lo persiste. El backend custodia la credencial y elige el
+modelo. Audio y transcripción permanecen fuera de Firestore hasta que el usuario
+guarda normalmente la nota.
 
 La URL se registra sin `userinfo`, parámetros de consulta ni fragmento. Las
 cabeceras de autorización nunca se registran y las respuestas mostradas como
