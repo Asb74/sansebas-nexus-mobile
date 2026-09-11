@@ -120,4 +120,27 @@ void main() {
       'AudioTranscriptionException: Servicio no disponible (HTTP 503)',
     );
   });
+
+  test('accepts only a complete HTTP transcription endpoint', () {
+    expect(
+      HttpAudioSegmentTranscriber(
+        endpoint: '  https://backend.example/transcribe  ',
+      ).endpoint,
+      'https://backend.example/transcribe',
+    );
+    expect(
+      HttpAudioSegmentTranscriber(
+        endpoint: 'https://backend.example/transcribe',
+      ).isConfigured,
+      isTrue,
+    );
+    expect(HttpAudioSegmentTranscriber(endpoint: '').isConfigured, isFalse);
+    expect(HttpAudioSegmentTranscriber(endpoint: '/transcribe').isConfigured, isFalse);
+    expect(
+      HttpAudioSegmentTranscriber(
+        endpoint: 'ftp://backend.example/transcribe',
+      ).isConfigured,
+      isFalse,
+    );
+  });
 }
