@@ -81,7 +81,7 @@ export const transcribe = onRequest(
   async (request, response) => {
     if (request.method !== "POST") {
       response.set("Allow", "POST");
-      error(response, 400, "invalid_request");
+      error(response, 405, "method_not_allowed");
       return;
     }
 
