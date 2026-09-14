@@ -21,8 +21,9 @@ firebase functions:secrets:set OPENAI_API_KEY
 firebase deploy --only functions:transcribe --project sansebas-nexus
 ```
 
-La URL resultante es
-`https://europe-west1-sansebas-nexus.cloudfunctions.net/transcribe`.
+Al desplegar, Firebase CLI muestra la URL HTTPS real de la función. Debe usarse
+esa URL; el repositorio no incorpora una URL de servicio como valor
+predeterminado.
 
 ## Configuración de una compilación
 
@@ -31,13 +32,13 @@ URL (sin claves ni tokens en la propia URL) al compilar o ejecutar:
 
 ```sh
 flutter run \
-  --dart-define=AUDIO_TRANSCRIPTION_ENDPOINT=https://europe-west1-sansebas-nexus.cloudfunctions.net/transcribe
+  --dart-define=AUDIO_TRANSCRIPTION_ENDPOINT=<URL_HTTPS_REAL_DE_TRANSCRIBE>
 
 flutter build apk \
-  --dart-define=AUDIO_TRANSCRIPTION_ENDPOINT=https://europe-west1-sansebas-nexus.cloudfunctions.net/transcribe
+  --dart-define=AUDIO_TRANSCRIPTION_ENDPOINT=<URL_HTTPS_REAL_DE_TRANSCRIBE>
 
 flutter build appbundle \
-  --dart-define=AUDIO_TRANSCRIPTION_ENDPOINT=https://europe-west1-sansebas-nexus.cloudfunctions.net/transcribe
+  --dart-define=AUDIO_TRANSCRIPTION_ENDPOINT=<URL_HTTPS_REAL_DE_TRANSCRIBE>
 ```
 
 El endpoint debe aceptar una petición `multipart/form-data` con el archivo en el

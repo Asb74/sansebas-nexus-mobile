@@ -153,6 +153,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       _lastRecordingSession = session;
       await _addAudioAttachments(session);
       final completed = await _audioTranscriptionService.transcribe(session);
+      _lastRecordingSession = completed;
       if (completed.status != RecordingSessionStatus.ready) {
         throw const AudioTranscriptionException('recoverable_transcription_error');
       }
@@ -160,7 +161,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       setState(() {
         _lastRecordingSession = completed;
         _audioStatus = _AudioCaptureStatus.completed;
-        _appendTranscriptionToContent(completed.transcription);
+        _applyTranscriptionToContent(completed.transcription);
       });
       _showValidationMessage('✓ Transcripción completada');
     } catch (error, stackTrace) {
@@ -187,10 +188,9 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
     }
   }
 
-  void _appendTranscriptionToContent(String transcription) {
+  void _applyTranscriptionToContent(String transcription) {
     debugPrint('NOTE_CONTENT: transcription applied chars=${transcription.trim().length}');
-    final previous = _contentController.text.trim();
-    _contentController.text = previous.isEmpty ? transcription.trim() : '$previous\n\n${transcription.trim()}';
+    _contentController.text = transcription.trim();
     _contentController.selection = TextSelection.collapsed(offset: _contentController.text.length);
     debugPrint('NOTE_CONTENT: field updated successfully');
   }
@@ -218,7 +218,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       setState(() {
         _lastRecordingSession = result;
         _audioStatus = _AudioCaptureStatus.completed;
-        _appendTranscriptionToContent(result.transcription);
+        _applyTranscriptionToContent(result.transcription);
       });
     } catch (error, stackTrace) {
       debugPrint('AUDIO_TRANSCRIPTION: exception type=${error.runtimeType}');
