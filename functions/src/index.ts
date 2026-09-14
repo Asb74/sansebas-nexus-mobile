@@ -62,7 +62,8 @@ class UploadError extends Error {
 
 async function requestTranscription(upload: AudioUpload): Promise<string> {
   const form = new FormData();
-  form.append("file", new Blob([upload.bytes], {type: upload.mimeType}), upload.filename);
+  const fileBytes = new Uint8Array(upload.bytes);
+  form.append("file", new Blob([fileBytes], {type: upload.mimeType}), upload.filename);
   form.append("model", "gpt-4o-mini-transcribe");
   const providerResponse = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
