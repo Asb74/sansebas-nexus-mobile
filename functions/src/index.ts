@@ -60,8 +60,6 @@ class UploadError extends Error {
   constructor(
     readonly code: string,
     readonly status: number,
-    readonly providerStatus?: number,
-    readonly providerBody?: string,
   ) {
     super(code);
   }
@@ -127,10 +125,10 @@ async function requestTranscription(upload: AudioUpload): Promise<string> {
     const message = safeProviderDiagnostic(caught instanceof Error ? caught.message : caught);
     const cause = safeProviderDiagnostic(caught instanceof Error ? caught.cause : undefined);
     console.error(
-      `TRANSCRIPTION_PROVIDER_ERROR provider=openai name=${JSON.stringify(name)} ` +
+      `TRANSCRIPTION_PROVIDER_FETCH_EXCEPTION provider=openai name=${JSON.stringify(name)} ` +
       `message=${JSON.stringify(message)} cause=${JSON.stringify(cause)}`,
     );
-    throw new UploadError("transcription_provider_fetch_error", 502, undefined, message);
+    throw new UploadError("transcription_provider_fetch_error", 502);
   }
   const providerOk = providerResponse.status >= 200 && providerResponse.status < 300;
   console.log(
@@ -143,12 +141,7 @@ async function requestTranscription(upload: AudioUpload): Promise<string> {
       `TRANSCRIPTION_PROVIDER_ERROR provider=openai status=${providerResponse.status} ` +
       `content_type=${providerResponse.contentType ?? "unknown"} body=${JSON.stringify(safeResponseBody)}`,
     );
-    throw new UploadError(
-      "transcription_provider_error",
-      502,
-      providerResponse.status,
-      safeResponseBody,
-    );
+    throw new UploadError("transcription_provider_error", 502);
   }
   let body: {text?: unknown} | undefined;
   try {
@@ -162,12 +155,7 @@ async function requestTranscription(upload: AudioUpload): Promise<string> {
       `TRANSCRIPTION_PROVIDER_INVALID_RESPONSE status=${providerResponse.status} ` +
       `body=${JSON.stringify(safeResponseBody)}`,
     );
-    throw new UploadError(
-      "transcription_provider_error",
-      502,
-      providerResponse.status,
-      safeResponseBody,
-    );
+    throw new UploadError("transcription_provider_error", 502);
   }
   return text;
 }
@@ -200,21 +188,6 @@ export const transcribe = onRequest(
       response.status(200).json({text});
     } catch (caught) {
       if (caught instanceof UploadError) {
-        if (caught.code === "transcription_provider_error") {
-          response.status(caught.status).json({
-            error: caught.code,
-            provider_status: caught.providerStatus,
-            provider_message: caught.providerBody,
-          });
-          return;
-        }
-        if (caught.code === "transcription_provider_fetch_error") {
-          response.status(caught.status).json({
-            error: caught.code,
-            provider_message: caught.providerBody,
-          });
-          return;
-        }
         error(response, caught.status, caught.code);
         return;
       }
