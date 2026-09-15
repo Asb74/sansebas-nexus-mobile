@@ -66,33 +66,25 @@ async function requestTranscription(upload: AudioUpload): Promise<string> {
   const fileBytes = new Uint8Array(upload.bytes);
   form.append("file", new Blob([fileBytes], {type: upload.mimeType}), upload.filename);
   form.append("model", model);
-  console.info("TRANSCRIPTION_PROVIDER_REQUEST", {
-    provider: "openai",
-    model,
-    filename: upload.filename,
-    mimeType: upload.mimeType,
-    audioBytes: upload.bytes.length,
-  });
+  console.log(
+    `TRANSCRIPTION_PROVIDER_REQUEST provider=openai model=${model} ` +
+    `filename=${upload.filename} mime=${upload.mimeType} size_bytes=${upload.bytes.length}`,
+  );
   const providerResponse = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
     headers: {Authorization: `Bearer ${openAiApiKey.value()}`},
     body: form,
   });
   const providerContentType = providerResponse.headers.get("content-type");
-  console.info("TRANSCRIPTION_PROVIDER_RESPONSE", {
-    provider: "openai",
-    status: providerResponse.status,
-    contentType: providerContentType,
-    ok: providerResponse.ok,
-  });
+  console.log(
+    `TRANSCRIPTION_PROVIDER_RESPONSE provider=openai status=${providerResponse.status} ok=${providerResponse.ok}`,
+  );
   if (!providerResponse.ok) {
     const errorBody = await providerResponse.text();
-    console.error("TRANSCRIPTION_PROVIDER_ERROR", {
-      provider: "openai",
-      status: providerResponse.status,
-      contentType: providerContentType,
-      bodyPreview: errorBody.substring(0, 2000),
-    });
+    console.error(
+      `TRANSCRIPTION_PROVIDER_ERROR provider=openai status=${providerResponse.status} ` +
+      `content_type=${providerContentType ?? "unknown"} body=${errorBody.substring(0, 2000)}`,
+    );
     throw new UploadError("transcription_provider_error", 502);
   }
   const body = await providerResponse.json() as {text?: unknown};
