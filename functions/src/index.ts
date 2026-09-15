@@ -1,8 +1,10 @@
 import Busboy from "busboy";
+import FormData from "form-data";
 import {initializeApp} from "firebase-admin/app";
 import {getAuth} from "firebase-admin/auth";
 import {defineSecret} from "firebase-functions/params";
 import {onRequest} from "firebase-functions/v2/https";
+import {request as httpsRequest} from "node:https";
 
 initializeApp();
 
@@ -81,40 +83,65 @@ function safeProviderDiagnostic(value: unknown): string {
 async function requestTranscription(upload: AudioUpload): Promise<string> {
   const model = "gpt-4o-mini-transcribe";
   const form = new FormData();
-  const fileBytes = new Uint8Array(upload.bytes);
-  form.append("file", new Blob([fileBytes], {type: upload.mimeType}), upload.filename);
+  form.append("file", upload.bytes, {
+    filename: upload.filename,
+    contentType: upload.mimeType,
+  });
   form.append("model", model);
   console.log(
     `TRANSCRIPTION_PROVIDER_REQUEST provider=openai model=${model} ` +
     `filename=${upload.filename} mime=${upload.mimeType} size_bytes=${upload.bytes.length}`,
   );
-  let providerResponse: Response;
+  let providerResponse: {status: number; contentType?: string; body: string};
   try {
-    providerResponse = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: {Authorization: `Bearer ${openAiApiKey.value()}`},
-      body: form,
+    const contentLength = await new Promise<number>((resolve, reject) => {
+      form.getLength((caught, length) => caught ? reject(caught) : resolve(length));
+    });
+    providerResponse = await new Promise((resolve, reject) => {
+      const providerRequest = httpsRequest({
+        protocol: "https:",
+        hostname: "api.openai.com",
+        path: "/v1/audio/transcriptions",
+        method: "POST",
+        headers: {
+          ...form.getHeaders(),
+          Authorization: `Bearer ${openAiApiKey.value()}`,
+          "Content-Length": contentLength,
+        },
+      }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on("error", reject);
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => resolve({
+          status: response.statusCode ?? 502,
+          contentType: response.headers["content-type"],
+          body: Buffer.concat(chunks).toString("utf8"),
+        }));
+      });
+      providerRequest.on("error", reject);
+      form.on("error", reject);
+      form.pipe(providerRequest);
     });
   } catch (caught) {
     const name = safeProviderDiagnostic(caught instanceof Error ? caught.name : "unknown");
     const message = safeProviderDiagnostic(caught instanceof Error ? caught.message : caught);
     const cause = safeProviderDiagnostic(caught instanceof Error ? caught.cause : undefined);
     console.error(
-      `TRANSCRIPTION_PROVIDER_FETCH_EXCEPTION name=${JSON.stringify(name)} ` +
+      `TRANSCRIPTION_PROVIDER_ERROR provider=openai name=${JSON.stringify(name)} ` +
       `message=${JSON.stringify(message)} cause=${JSON.stringify(cause)}`,
     );
     throw new UploadError("transcription_provider_fetch_error", 502, undefined, message);
   }
-  const providerContentType = providerResponse.headers.get("content-type");
+  const providerOk = providerResponse.status >= 200 && providerResponse.status < 300;
   console.log(
-    `TRANSCRIPTION_PROVIDER_RESPONSE provider=openai status=${providerResponse.status} ok=${providerResponse.ok}`,
+    `TRANSCRIPTION_PROVIDER_RESPONSE provider=openai status=${providerResponse.status} ok=${providerOk}`,
   );
-  const responseBody = await providerResponse.text();
+  const responseBody = providerResponse.body;
   const safeResponseBody = safeProviderDiagnostic(responseBody);
-  if (!providerResponse.ok) {
+  if (!providerOk) {
     console.error(
       `TRANSCRIPTION_PROVIDER_ERROR provider=openai status=${providerResponse.status} ` +
-      `content_type=${providerContentType ?? "unknown"} body=${JSON.stringify(safeResponseBody)}`,
+      `content_type=${providerResponse.contentType ?? "unknown"} body=${JSON.stringify(safeResponseBody)}`,
     );
     throw new UploadError(
       "transcription_provider_error",
