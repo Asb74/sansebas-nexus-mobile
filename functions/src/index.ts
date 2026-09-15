@@ -61,16 +61,40 @@ class UploadError extends Error {
 }
 
 async function requestTranscription(upload: AudioUpload): Promise<string> {
+  const model = "gpt-4o-mini-transcribe";
   const form = new FormData();
   const fileBytes = new Uint8Array(upload.bytes);
   form.append("file", new Blob([fileBytes], {type: upload.mimeType}), upload.filename);
-  form.append("model", "gpt-4o-mini-transcribe");
+  form.append("model", model);
+  console.info("TRANSCRIPTION_PROVIDER_REQUEST", {
+    provider: "openai",
+    model,
+    filename: upload.filename,
+    mimeType: upload.mimeType,
+    audioBytes: upload.bytes.length,
+  });
   const providerResponse = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
     headers: {Authorization: `Bearer ${openAiApiKey.value()}`},
     body: form,
   });
-  if (!providerResponse.ok) throw new UploadError("transcription_provider_error", 502);
+  const providerContentType = providerResponse.headers.get("content-type");
+  console.info("TRANSCRIPTION_PROVIDER_RESPONSE", {
+    provider: "openai",
+    status: providerResponse.status,
+    contentType: providerContentType,
+    ok: providerResponse.ok,
+  });
+  if (!providerResponse.ok) {
+    const errorBody = await providerResponse.text();
+    console.error("TRANSCRIPTION_PROVIDER_ERROR", {
+      provider: "openai",
+      status: providerResponse.status,
+      contentType: providerContentType,
+      bodyPreview: errorBody.substring(0, 2000),
+    });
+    throw new UploadError("transcription_provider_error", 502);
+  }
   const body = await providerResponse.json() as {text?: unknown};
   const text = typeof body.text === "string" ? body.text.trim() : "";
   if (!text) throw new UploadError("transcription_provider_error", 502);
