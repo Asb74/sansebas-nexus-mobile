@@ -208,19 +208,26 @@ class AudioTranscriptionService {
 
   final RecordingSessionStore _store;
   final AudioSegmentTranscriber _transcriber;
+  final Set<String> _activeSessions = <String>{};
 
   Future<RecordingSession> transcribe(RecordingSession session) async {
+    if (!_activeSessions.add(session.id)) return session;
     var current = session.copyWith(status: RecordingSessionStatus.transcribing, clearError: true);
     await _store.save(current);
+    debugPrint('AUDIO_SESSION: state=${current.status.value}');
+    debugPrint('AUDIO_SESSION: retry_pending_segments=${current.segments.where((segment) => !segment.isTranscribed).length}');
     debugPrint('AUDIO_TRANSCRIPTION: segmentation_started segments=${current.segments.length}');
     try {
       final ordered = current.segments.toList()..sort((a, b) => a.index.compareTo(b.index));
       for (var position = 0; position < ordered.length; position++) {
         final segment = ordered[position];
         if (segment.isTranscribed) continue;
+        ordered[position] = segment.copyWith(status: RecordingSegmentStatus.transcribing);
+        current = current.copyWith(segments: List.unmodifiable(ordered));
+        await _store.save(current);
         debugPrint('AUDIO_TRANSCRIPTION: segment index=${segment.index + 1} started');
         final text = await _transcriber.transcribe(segment.localAudioPath);
-        ordered[position] = segment.copyWith(transcription: text);
+        ordered[position] = segment.copyWith(transcription: text, status: RecordingSegmentStatus.completed);
         current = current.copyWith(segments: List.unmodifiable(ordered));
         await _store.save(current);
         debugPrint('AUDIO_TRANSCRIPTION: segment index=${segment.index + 1} status=completed');
@@ -228,19 +235,38 @@ class AudioTranscriptionService {
       }
       current = current.copyWith(status: RecordingSessionStatus.ready, clearError: true);
       await _store.save(current);
+      debugPrint('AUDIO_SESSION: state=${current.status.value}');
+      debugPrint('AUDIO_SESSION: transcription_saved chars=${current.transcription.length}');
       debugPrint('AUDIO_TRANSCRIPTION: completed chars=${current.transcription.length}');
       return current;
     } catch (error, stackTrace) {
+      final failedSegments = current.segments
+          .map((segment) => segment.status == RecordingSegmentStatus.transcribing
+              ? segment.copyWith(status: RecordingSegmentStatus.failed)
+              : segment)
+          .toList(growable: false);
       current = current.copyWith(
         status: RecordingSessionStatus.errorRecoverable,
+        segments: failedSegments,
         errorMessage: error.toString(),
       );
       await _store.save(current);
+      debugPrint('AUDIO_SESSION: state=${current.status.value}');
       debugPrint('AUDIO_TRANSCRIPTION: recoverable_error type=${error.runtimeType}');
       debugPrint('AUDIO_TRANSCRIPTION: exception type=${error.runtimeType}');
       debugPrint('AUDIO_TRANSCRIPTION: exception message=$error');
       debugPrint('AUDIO_TRANSCRIPTION: stacktrace=$stackTrace');
       return current;
+    } finally {
+      _activeSessions.remove(session.id);
     }
   }
+}
+
+String appendTranscriptionToContent(String existingContent, String transcription) {
+  final addition = transcription.trim();
+  if (addition.isEmpty) return existingContent;
+  final existing = existingContent.trimRight();
+  if (existing.isEmpty) return addition;
+  return '$existing\n\n$addition';
 }
