@@ -33,7 +33,7 @@ class NewNoteScreen extends StatefulWidget {
   State<NewNoteScreen> createState() => _NewNoteScreenState();
 }
 
-class _NewNoteScreenState extends State<NewNoteScreen> {
+class _NewNoteScreenState extends State<NewNoteScreen> with WidgetsBindingObserver {
   final _titleController = TextEditingController();
   final _tagsController = TextEditingController();
   final _contentController = TextEditingController();
@@ -53,6 +53,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   TopicMaster? _selectedTopic;
   NoteTypeMaster? _selectedType;
   bool _isSaving = false;
+  bool _audioOperationInProgress = false;
   _AudioCaptureStatus _audioStatus = _AudioCaptureStatus.idle;
   final Stopwatch _audioStopwatch = Stopwatch();
   Timer? _audioTimer;
@@ -68,21 +69,60 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _mastersFuture = _masterService.loadMasters();
     _draftMobileNoteId = _uuid.v4();
     _safeAudioRecorder = SafeAudioRecorder(
       store: _recordingStore,
       recorder: RecordAudioRecorderAdapter(_audioRecorder),
+      segmentDuration: configuredAudioSegmentDuration(),
     );
     _fileAudioTranscriber = HttpAudioSegmentTranscriber();
     _audioTranscriptionService = AudioTranscriptionService(
       store: _recordingStore,
       transcriber: _fileAudioTranscriber,
     );
+    unawaited(_recoverAudioSession());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refreshRecordingElapsed();
+      unawaited(_recoverAudioSession());
+    }
+    // inactive/paused/hidden/detached deliberately do not stop the recorder.
+  }
+
+  void _refreshRecordingElapsed() {
+    final session = _safeAudioRecorder.session;
+    if (session?.status != RecordingSessionStatus.recording || !mounted) return;
+    setState(() => _audioElapsed = DateTime.now().difference(session!.startedAt));
+  }
+
+  Future<void> _recoverAudioSession() async {
+    if (_audioOperationInProgress) return;
+    if (_safeAudioRecorder.session?.status == RecordingSessionStatus.recording) return;
+    final pending = await _recordingStore.pendingSessions();
+    if (pending.isEmpty || !mounted) return;
+    final matching = pending.where((session) => session.noteId == _draftMobileNoteId).toList();
+    final candidate = matching.isNotEmpty ? matching.first : pending.first;
+    final recovered = await _recordingStore.recover(candidate);
+    if (!mounted) return;
+    _lastRecordingSession = recovered;
+    if (recovered.transcription.isNotEmpty && !recovered.transcriptionApplied) {
+      await _applyPersistedTranscription(recovered);
+    } else {
+      setState(() => _audioStatus = recovered.status == RecordingSessionStatus.ready
+          ? _AudioCaptureStatus.completed
+          : _AudioCaptureStatus.failed);
+    }
+    debugPrint('AUDIO_SESSION: recovered id=${recovered.id}');
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _titleController.dispose();
     _tagsController.dispose();
     _audioTimer?.cancel();
@@ -110,14 +150,15 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
   }
 
   Future<void> _toggleAudioRecording() async {
-    if (_isSaving) return;
+    if (_isSaving || _audioOperationInProgress) return;
     if (_audioStatus == _AudioCaptureStatus.recording) {
       await _stopAudioRecording();
       return;
     }
 
     try {
-      await _safeAudioRecorder.start();
+      _audioOperationInProgress = true;
+      await _safeAudioRecorder.start(noteId: _draftMobileNoteId);
       if (!mounted) return;
       _audioStopwatch
         ..reset()
@@ -134,10 +175,14 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       debugPrint('No se pudo iniciar la grabación. Error exacto: $error');
       if (!mounted) return;
       _showValidationMessage('No se pudo iniciar la grabación de audio.');
+    } finally {
+      _audioOperationInProgress = false;
     }
   }
 
   Future<void> _stopAudioRecording() async {
+    if (_audioOperationInProgress) return;
+    _audioOperationInProgress = true;
     _audioTimer?.cancel();
     _audioStopwatch.stop();
     if (mounted) {
@@ -161,8 +206,8 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       setState(() {
         _lastRecordingSession = completed;
         _audioStatus = _AudioCaptureStatus.completed;
-        _applyTranscriptionToContent(completed.transcription);
       });
+      await _applyPersistedTranscription(completed);
       _showValidationMessage('✓ Transcripción completada');
     } catch (error, stackTrace) {
       debugPrint('No se pudo completar la transcripción. Error exacto: $error');
@@ -171,6 +216,8 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       debugPrint('AUDIO_TRANSCRIPTION: stacktrace=$stackTrace');
       if (!mounted) return;
       setState(() => _audioStatus = _AudioCaptureStatus.failed);
+    } finally {
+      _audioOperationInProgress = false;
     }
   }
 
@@ -190,14 +237,25 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
 
   void _applyTranscriptionToContent(String transcription) {
     debugPrint('NOTE_CONTENT: transcription applied chars=${transcription.trim().length}');
-    _contentController.text = transcription.trim();
+    _contentController.text = appendTranscriptionToContent(_contentController.text, transcription);
     _contentController.selection = TextSelection.collapsed(offset: _contentController.text.length);
     debugPrint('NOTE_CONTENT: field updated successfully');
   }
 
+  Future<void> _applyPersistedTranscription(RecordingSession session) async {
+    if (session.transcriptionApplied || session.transcription.trim().isEmpty || !mounted) return;
+    _applyTranscriptionToContent(session.transcription);
+    final applied = session.copyWith(transcriptionApplied: true);
+    await _recordingStore.save(applied);
+    _lastRecordingSession = applied;
+    debugPrint('AUDIO_SESSION: transcription_applied');
+  }
+
   Future<void> _retryTranscription() async {
+    if (_audioOperationInProgress) return;
     final session = _lastRecordingSession;
     if (session == null) return;
+    _audioOperationInProgress = true;
     debugPrint('AUDIO_TRANSCRIPTION: retry requested');
     for (final segment in session.segments) {
       final file = File(segment.localAudioPath);
@@ -218,13 +276,15 @@ class _NewNoteScreenState extends State<NewNoteScreen> {
       setState(() {
         _lastRecordingSession = result;
         _audioStatus = _AudioCaptureStatus.completed;
-        _applyTranscriptionToContent(result.transcription);
       });
+      await _applyPersistedTranscription(result);
     } catch (error, stackTrace) {
       debugPrint('AUDIO_TRANSCRIPTION: exception type=${error.runtimeType}');
       debugPrint('AUDIO_TRANSCRIPTION: exception message=$error');
       debugPrint('AUDIO_TRANSCRIPTION: stacktrace=$stackTrace');
       if (mounted) setState(() => _audioStatus = _AudioCaptureStatus.failed);
+    } finally {
+      _audioOperationInProgress = false;
     }
   }
 

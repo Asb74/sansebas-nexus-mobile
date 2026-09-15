@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 
@@ -68,6 +69,18 @@ class RecordAudioRecorderAdapter implements AudioRecorderAdapter {
   Future<String?> stop() => recorder.stop();
 }
 
+class AndroidRecordingForegroundService {
+  static const _channel = MethodChannel('com.sansebas.nexus.mobile/audio_recording');
+  Future<void> start() async {
+    if (!Platform.isAndroid) return;
+    await _channel.invokeMethod<void>('startForegroundRecording');
+  }
+  Future<void> stop() async {
+    if (!Platform.isAndroid) return;
+    await _channel.invokeMethod<void>('stopForegroundRecording');
+  }
+}
+
 const _audioCodec = 'aacLc';
 const _audioMimeType = 'audio/mp4';
 const _audioSampleRate = 44100;
@@ -84,14 +97,17 @@ class SafeAudioRecorder {
     required AudioRecorderAdapter recorder,
     this.segmentDuration = const Duration(minutes: 21),
     Uuid uuid = const Uuid(),
+    AndroidRecordingForegroundService? foregroundService,
   })  : _store = store,
         _recorder = recorder,
-        _uuid = uuid;
+        _uuid = uuid,
+        _foregroundService = foregroundService ?? AndroidRecordingForegroundService();
 
   final RecordingSessionStore _store;
   final AudioRecorderAdapter _recorder;
   final Duration segmentDuration;
   final Uuid _uuid;
+  final AndroidRecordingForegroundService _foregroundService;
 
   RecordingSession? _session;
   DateTime? _segmentStartedAt;
@@ -100,7 +116,10 @@ class SafeAudioRecorder {
 
   RecordingSession? get session => _session;
 
-  Future<RecordingSession> start() async {
+  Future<RecordingSession> start({String? noteId}) async {
+    if (_session?.status == RecordingSessionStatus.recording || await _recorder.isRecording()) {
+      throw const AudioRecordingException('recording_already_active');
+    }
     debugPrint('AUDIO_RECORDING: start requested');
     final hasPermission = await _recorder.hasPermission();
     debugPrint('AUDIO_RECORDING: permission microphone=${hasPermission ? 'granted' : 'denied'}');
@@ -109,10 +128,18 @@ class SafeAudioRecorder {
       id: _uuid.v4(),
       startedAt: DateTime.now(),
       status: RecordingSessionStatus.recording,
+      noteId: noteId,
     );
     _session = session;
     await _store.save(session);
-    await _startSegment();
+    try {
+      await _foregroundService.start();
+      await _startSegment();
+    } catch (_) {
+      await _foregroundService.stop();
+      rethrow;
+    }
+    debugPrint('AUDIO_SESSION: created id=${session.id}');
     return session;
   }
 
@@ -157,7 +184,8 @@ class SafeAudioRecorder {
         : (elapsed > segmentDuration.inSeconds ? segmentDuration.inSeconds : elapsed);
     final updated = current.copyWith(segments: [
       ...current.segments,
-      RecordingSegment(index: current.segments.length, localAudioPath: path, durationSeconds: duration),
+      RecordingSegment(index: current.segments.length, localAudioPath: path, durationSeconds: duration,
+        sizeBytes: await File(path).length()),
     ]);
     _session = updated;
     await _store.save(updated);
@@ -187,7 +215,11 @@ class SafeAudioRecorder {
     while (_rollingOver) {
       await Future<void>.delayed(const Duration(milliseconds: 20));
     }
-    await _finishSegment();
+    try {
+      await _finishSegment();
+    } finally {
+      await _foregroundService.stop();
+    }
     final current = _session;
     if (current == null) throw const AudioRecordingException('no_active_recording');
     final completed = current.copyWith(status: RecordingSessionStatus.pendingTranscription);
@@ -212,6 +244,15 @@ class SafeAudioRecorder {
     }
     return completed;
   }
+}
+
+const int productionAudioSegmentationThresholdBytes = 20 * 1024 * 1024;
+
+Duration configuredAudioSegmentDuration() {
+  const configured = int.fromEnvironment('AUDIO_SEGMENTATION_THRESHOLD_BYTES', defaultValue: productionAudioSegmentationThresholdBytes);
+  final threshold = kDebugMode ? configured : productionAudioSegmentationThresholdBytes;
+  final seconds = (threshold * 8 / _audioBitRate).floor();
+  return Duration(seconds: seconds < 1 ? 1 : seconds);
 }
 
 bool isPlausibleAudioFileSize({

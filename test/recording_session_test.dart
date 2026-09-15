@@ -46,6 +46,56 @@ void main() {
     expect(recovered.id, 'session-1');
     expect(recovered.durationSeconds, 757);
     expect(recovered.segments.single.localAudioPath, '/local/audio.m4a');
+    expect(recovered.toJson()['transcription_applied'], isFalse);
+    expect(recovered.toJson()['updated_at'], isNotNull);
+  });
+
+  test('appends transcription without losing manual or prior content', () {
+    expect(appendTranscriptionToContent('', 'Audio uno.'), 'Audio uno.');
+    expect(appendTranscriptionToContent('Texto manual.', 'Audio uno.'),
+        'Texto manual.\n\nAudio uno.');
+    final twice = appendTranscriptionToContent(
+      appendTranscriptionToContent('Texto manual.', 'Audio uno.'), 'Audio dos.');
+    expect(twice, 'Texto manual.\n\nAudio uno.\n\nAudio dos.');
+    expect(appendTranscriptionToContent('Texto intacto', '  '), 'Texto intacto');
+    expect(appendTranscriptionToContent('Texto\n\n', 'Audio'), 'Texto\n\nAudio');
+  });
+
+  test('applied persisted transcription remains marked idempotently', () {
+    final session = RecordingSession(
+      id: 'applied', startedAt: DateTime.utc(2026),
+      status: RecordingSessionStatus.ready, transcriptionApplied: true,
+      segments: const [RecordingSegment(index: 0, localAudioPath: 'audio', durationSeconds: 1,
+        transcription: 'Una sola vez.', status: RecordingSegmentStatus.completed)],
+    );
+    expect(session.transcriptionApplied, isTrue);
+    expect(session.transcription, 'Una sola vez.');
+  });
+
+  test('recovers orphaned transcribing session and discovers finalized M4A', () async {
+    final directory = await store.audioDirectory('orphan');
+    final audio = File('${directory.path}/segment_0000.m4a');
+    await audio.writeAsBytes(List<int>.filled(2048, 1));
+    final orphan = RecordingSession(id: 'orphan', startedAt: DateTime.utc(2026),
+      status: RecordingSessionStatus.transcribing);
+    await store.save(orphan);
+    final recovered = await store.recover(orphan);
+    expect(recovered.status, RecordingSessionStatus.errorRecoverable);
+    expect(recovered.segments.single.localAudioPath, audio.path);
+    expect(recovered.segments.single.sizeBytes, 2048);
+  });
+
+  test('lists a ready transcription until it has been applied', () async {
+    final unapplied = RecordingSession(
+      id: 'ready-unapplied', startedAt: DateTime.utc(2026),
+      status: RecordingSessionStatus.ready,
+      segments: const [RecordingSegment(index: 0, localAudioPath: 'audio',
+        durationSeconds: 1, transcription: 'Recuperar.')],
+    );
+    await store.save(unapplied);
+    expect((await store.pendingSessions()).single.id, 'ready-unapplied');
+    await store.save(unapplied.copyWith(transcriptionApplied: true));
+    expect(await store.pendingSessions(), isEmpty);
   });
 
   test('transcribes segments in order and concatenates without Firestore', () async {
@@ -83,6 +133,7 @@ void main() {
 
     expect(result.status, RecordingSessionStatus.errorRecoverable);
     expect(result.segments.first.transcription, 'Ya guardado.');
+    expect(result.segments.last.status, RecordingSegmentStatus.failed);
     expect((await store.read('retryable'))!.status, RecordingSessionStatus.errorRecoverable);
   });
 
