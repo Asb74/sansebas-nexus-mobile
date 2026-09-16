@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sansebas_nexus_mobile/features/voice/models/recording_session.dart';
 import 'package:sansebas_nexus_mobile/features/voice/services/audio_transcription_service.dart';
+import 'package:sansebas_nexus_mobile/features/voice/services/audio_limits.dart';
+import 'package:sansebas_nexus_mobile/features/voice/services/audio_recovery_service.dart';
 import 'package:sansebas_nexus_mobile/features/voice/services/recording_session_store.dart';
 import 'package:sansebas_nexus_mobile/features/voice/services/safe_audio_recorder.dart';
 
@@ -17,6 +19,27 @@ class _FakeTranscriber implements AudioSegmentTranscriber {
     calls.add(localAudioPath);
     if (localAudioPath == failPath) throw StateError('temporary');
     return results[localAudioPath]!;
+  }
+}
+
+class _FakeResegmenter implements M4aResegmenter {
+  _FakeResegmenter(this.directory);
+  final Directory directory;
+  int calls = 0;
+
+  @override
+  Future<List<String>> split({required RecordingSegment segment, required String outputDirectory}) async {
+    calls++;
+    final paths = <String>[];
+    for (var index = 0; index < 2; index++) {
+      final file = File('${directory.path}/segment_${segment.index}_part_$index.m4a');
+      await file.open(mode: FileMode.write).then((handle) async {
+        await handle.truncate(10 * 1024 * 1024);
+        await handle.close();
+      });
+      paths.add(file.path);
+    }
+    return paths;
   }
 }
 
@@ -189,6 +212,75 @@ void main() {
     expect(policy.isWithinSafeThreshold, isTrue);
   });
 
+  test('19 MiB and exactly 20 MiB are accepted; larger audio requires recovery', () {
+    expect(requiresAudioResegmentation(19 * 1024 * 1024), isFalse);
+    expect(requiresAudioResegmentation(20 * 1024 * 1024), isFalse);
+    expect(requiresAudioResegmentation(20 * 1024 * 1024 + 1), isTrue);
+    expect(recordingSegmentTargetBytes, 19 * 1024 * 1024);
+  });
+
+  test('recovery preserves originals, explicit part order, and persisted manifest', () async {
+    final directory = await store.audioDirectory('real-recovery');
+    final original = File('${directory.path}/segment_0000.m4a');
+    await original.open(mode: FileMode.write).then((handle) async {
+      await handle.truncate(serverMaxAudioBytes + 1000);
+      await handle.close();
+    });
+    final originalLength = await original.length();
+    final fake = _FakeResegmenter(directory);
+    final session = RecordingSession(id: 'real-recovery', startedAt: DateTime.utc(2026),
+      status: RecordingSessionStatus.pendingTranscription,
+      segments: [RecordingSegment(index: 0, localAudioPath: original.path,
+        durationSeconds: 1260, sizeBytes: originalLength)]);
+
+    final recovered = await AudioRecoveryService(store: store, resegmenter: fake).prepare(session);
+    expect(await original.exists(), isTrue);
+    expect(await original.length(), originalLength);
+    expect(recovered.segments.single.recoveryParts.map((part) => part.index), [0, 1]);
+    final persisted = await store.read('real-recovery');
+    expect(persisted!.segments.single.recoveryParts.length, 2);
+    expect(persisted.segments.single.localAudioPath, original.path);
+  });
+
+  test('completed recovery parts are skipped and pending parts retain global order', () async {
+    final parts = const [
+      RecordingRecoveryPart(index: 1, localAudioPath: '0.1', durationSeconds: 10,
+        sizeBytes: 10, status: RecordingSegmentStatus.pending),
+      RecordingRecoveryPart(index: 0, localAudioPath: '0.0', durationSeconds: 10,
+        sizeBytes: 10, status: RecordingSegmentStatus.completed, transcription: 'Primero.'),
+    ];
+    final session = RecordingSession(id: 'parts', startedAt: DateTime.utc(2026),
+      status: RecordingSessionStatus.errorRecoverable,
+      segments: [
+        RecordingSegment(index: 1, localAudioPath: '1', durationSeconds: 10),
+        RecordingSegment(index: 0, localAudioPath: '0', durationSeconds: 20, recoveryParts: parts),
+      ]);
+    final transcriber = _FakeTranscriber({'0.1': 'Segundo.', '1': 'Tercero.'});
+    final result = await AudioTranscriptionService(store: store, transcriber: transcriber).transcribe(session);
+
+    expect(transcriber.calls, ['0.1', '1']);
+    expect(result.transcription, 'Primero.\n\nSegundo.\n\nTercero.');
+    expect(result.status, RecordingSessionStatus.ready);
+  });
+
+  test('session recovery does not promote recovery parts to original segments', () async {
+    final directory = await store.audioDirectory('parts-restart');
+    final original = File('${directory.path}/segment_0000.m4a');
+    final part = File('${directory.path}/segment_0000_part_000.m4a');
+    await original.writeAsBytes([1, 2, 3]);
+    await part.writeAsBytes([1, 2]);
+    final session = RecordingSession(id: 'parts-restart', startedAt: DateTime.utc(2026),
+      status: RecordingSessionStatus.errorRecoverable,
+      segments: [RecordingSegment(index: 0, localAudioPath: original.path, durationSeconds: 2,
+        recoveryParts: [RecordingRecoveryPart(index: 0, localAudioPath: part.path,
+          durationSeconds: 1, sizeBytes: 2, transcription: 'Guardado.', status: RecordingSegmentStatus.completed)])]);
+    await store.save(session);
+
+    final recovered = await store.recover(session);
+    expect(recovered.segments, hasLength(1));
+    expect(recovered.segments.single.recoveryParts.single.transcription, 'Guardado.');
+  });
+
   test('formats the local recording timer below and above one hour', () {
     expect(formatAudioDuration(const Duration(seconds: 27)), '00:27');
     expect(formatAudioDuration(const Duration(hours: 1, minutes: 12, seconds: 34)), '01:12:34');
@@ -260,5 +352,32 @@ void main() {
         ),
       );
     }
+  });
+
+  test('oversized HTTP input is rejected locally before authentication', () async {
+    final audio = File('${temporary.path}/oversized.m4a');
+    final handle = await audio.open(mode: FileMode.write);
+    await handle.truncate(serverMaxAudioBytes + 1);
+    await handle.close();
+    var requestedToken = false;
+    final transcriber = HttpAudioSegmentTranscriber(
+      endpoint: 'https://backend.example/transcribe',
+      idTokenProvider: () async {
+        requestedToken = true;
+        return 'unused';
+      },
+    );
+
+    await expectLater(
+      transcriber.transcribe(audio.path),
+      throwsA(
+        isA<AudioTranscriptionException>().having(
+          (error) => error.message,
+          'message',
+          'requires_resegmentation',
+        ),
+      ),
+    );
+    expect(requestedToken, isFalse);
   });
 }

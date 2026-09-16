@@ -82,9 +82,10 @@ class RecordingSessionStore {
   Future<RecordingSession> recover(RecordingSession session) async {
     final directory = await audioDirectory(session.id);
     final known = {for (final segment in session.segments) segment.localAudioPath: segment};
+    final originalPattern = RegExp(r'segment_\d{4}\.m4a$');
     final files = await directory
         .list()
-        .where((entity) => entity is File && entity.path.endsWith('.m4a'))
+        .where((entity) => entity is File && originalPattern.hasMatch(entity.path))
         .cast<File>()
         .toList();
     files.sort((a, b) => a.path.compareTo(b.path));
@@ -92,7 +93,7 @@ class RecordingSessionStore {
     for (var index = 0; index < files.length; index++) {
       final file = files[index];
       final previous = known[file.path];
-      segments.add(previous ?? RecordingSegment(
+      segments.add(previous?.copyWith(sizeBytes: await file.length()) ?? RecordingSegment(
         index: index,
         localAudioPath: file.path,
         durationSeconds: 0,
