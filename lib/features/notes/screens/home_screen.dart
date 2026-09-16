@@ -42,7 +42,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (action == _RecoveryAction.delete) {
       await _confirmDelete(session);
     } else if (action == _RecoveryAction.continueProcessing) {
-      await Navigator.pushNamed(context, AppRoutes.voiceNote, arguments: session.id);
+      await Navigator.pushNamed(context, AppRoutes.newNote, arguments: session.id);
     }
   }
 

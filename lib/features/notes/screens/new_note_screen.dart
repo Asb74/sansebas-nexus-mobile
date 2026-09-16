@@ -110,6 +110,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> with WidgetsBindingObserv
     final recovered = await _recordingStore.recover(candidate);
     if (!mounted) return;
     _lastRecordingSession = recovered;
+    await _addAudioAttachments(recovered);
     if (recovered.transcription.isNotEmpty && !recovered.transcriptionApplied) {
       await _applyPersistedTranscription(recovered);
     } else {
@@ -223,13 +224,22 @@ class _NewNoteScreenState extends State<NewNoteScreen> with WidgetsBindingObserv
 
   Future<void> _addAudioAttachments(RecordingSession session) async {
     for (final segment in session.segments) {
+      final attachmentId = '${session.id}_segment_${segment.index.toString().padLeft(4, '0')}';
+      if (_pendingAttachments.any((item) => item.mobileAttachmentId == attachmentId)) continue;
       final attachment = await _attachmentService.buildMobileAttachmentFromPath(
         path: segment.localAudioPath,
         mobileNoteId: _draftMobileNoteId,
         captureMode: 'audio',
-        filename: 'audio_${DateTime.now().millisecondsSinceEpoch}_${segment.index + 1}.m4a',
+        attachmentId: attachmentId,
+        filename: 'segment_${segment.index.toString().padLeft(4, '0')}.m4a',
         mimeType: 'audio/mp4',
         durationSeconds: segment.durationSeconds,
+        recordingId: session.id,
+        segmentIndex: segment.index,
+        storagePath: segment.storagePath,
+        syncStatus: segment.uploadStatus == AudioUploadStatus.uploaded
+            ? SyncStatus.uploaded
+            : SyncStatus.pending,
       );
       if (mounted) setState(() => _pendingAttachments.add(attachment));
     }
@@ -421,11 +431,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> with WidgetsBindingObserv
 
     setState(() => _isSaving = true);
 
-    // Audio remains local while this flow is being verified. Other attachment
-    // types keep their existing upload behavior.
-    final uploadableAttachments = _pendingAttachments
-        .where((attachment) => attachment.captureMode != 'audio')
-        .toList(growable: false);
+    final uploadableAttachments = List<MobileAttachment>.unmodifiable(_pendingAttachments);
     final now = DateTime.now();
     final note = MobileNote(
       mobileNoteId: _draftMobileNoteId,
@@ -451,6 +457,9 @@ class _NewNoteScreenState extends State<NewNoteScreen> with WidgetsBindingObserv
           ? null
           : (_audioStatus == _AudioCaptureStatus.completed ? 'completed' : 'pending_transcription'),
       audioStorageStatus: _lastRecordingSession == null ? null : 'local',
+      recordings: _lastRecordingSession == null
+          ? const []
+          : [_lastRecordingSession!.toCloudMetadata()],
     );
 
     try {
@@ -460,6 +469,7 @@ class _NewNoteScreenState extends State<NewNoteScreen> with WidgetsBindingObserv
         await _firebaseSyncService.createNoteWithAttachments(
           note: note,
           attachments: uploadableAttachments,
+          onAttachmentUploaded: _persistUploadedAudioSegment,
         );
       }
       if (!mounted) return;
@@ -479,6 +489,28 @@ class _NewNoteScreenState extends State<NewNoteScreen> with WidgetsBindingObserv
       if (mounted) {
         setState(() => _isSaving = false);
       }
+    }
+  }
+
+  Future<void> _persistUploadedAudioSegment(MobileAttachment attachment) async {
+    final session = _lastRecordingSession;
+    if (session == null || attachment.recordingId != session.id) return;
+    final segments = session.segments.map((segment) {
+      if (segment.index != attachment.segmentIndex) return segment;
+      return segment.copyWith(
+        uploadStatus: AudioUploadStatus.uploaded,
+        storagePath: attachment.storagePath,
+      );
+    }).toList(growable: false);
+    final updated = session.copyWith(segments: segments);
+    await _recordingStore.save(updated);
+    _lastRecordingSession = updated;
+    final attachmentIndex = _pendingAttachments.indexWhere(
+      (item) => item.mobileAttachmentId == attachment.mobileAttachmentId,
+    );
+    if (attachmentIndex >= 0) {
+      _pendingAttachments[attachmentIndex] = attachment;
+      if (mounted) setState(() {});
     }
   }
 
@@ -759,8 +791,30 @@ class _AttachmentsPreview extends StatelessWidget {
       );
     }
 
+    final audioGroups = <String, List<MobileAttachment>>{};
+    for (final attachment in attachments.where((item) => item.recordingId != null)) {
+      audioGroups.putIfAbsent(attachment.recordingId!, () => []).add(attachment);
+    }
+    final regular = attachments.where((item) => item.recordingId == null);
     return Column(
-      children: attachments
+      children: [
+        ...audioGroups.entries.map((entry) {
+          final segments = entry.value..sort((a, b) => (a.segmentIndex ?? 0).compareTo(b.segmentIndex ?? 0));
+          final bytes = segments.fold<int>(0, (sum, item) => sum + item.size);
+          final seconds = segments.fold<int>(0, (sum, item) => sum + (item.durationSeconds ?? 0));
+          final uploaded = segments.every((item) => item.isUploaded);
+          return Card(
+            child: ListTile(
+              leading: const Icon(Icons.mic, color: AppColors.primaryBlue),
+              title: const Text('Grabación de audio'),
+              subtitle: Text('${formatAudioDuration(Duration(seconds: seconds))} · '
+                  '${segments.length} segmento${segments.length == 1 ? '' : 's'} · ${_formatBytes(bytes)}\n'
+                  '${uploaded ? 'Audio sincronizado' : 'Pendiente de sincronización'}'),
+              isThreeLine: true,
+            ),
+          );
+        }),
+        ...regular
           .map(
             (attachment) => Card(
               child: ListTile(
@@ -787,8 +841,8 @@ class _AttachmentsPreview extends StatelessWidget {
                 ),
               ),
             ),
-          )
-          .toList(growable: false),
+          ),
+      ],
     );
   }
 

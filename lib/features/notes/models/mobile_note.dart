@@ -45,6 +45,7 @@ class MobileNote {
     this.transcriptionStatus,
     this.audioStorageStatus,
     this.audioStoragePath,
+    this.recordings = const [],
   });
 
   final String mobileNoteId;
@@ -88,6 +89,8 @@ class MobileNote {
   final String? transcriptionStatus;
   final String? audioStorageStatus;
   final String? audioStoragePath;
+  /// Logical recordings. Contains metadata and authenticated Storage paths only.
+  final List<Map<String, dynamic>> recordings;
 
   bool get hasAttachments => attachmentsCount > 0;
   bool get hasLocation => latitude != null && longitude != null;
@@ -136,6 +139,7 @@ class MobileNote {
       'transcription_status': transcriptionStatus,
       'audio_storage_status': audioStorageStatus,
       'audio_storage_path': audioStoragePath,
+      'recordings': recordings,
     };
   }
 
@@ -197,6 +201,10 @@ class MobileNote {
       transcriptionStatus: _readNullableString(map['transcription_status'] ?? map['transcriptionStatus']),
       audioStorageStatus: _readNullableString(map['audio_storage_status'] ?? map['audioStorageStatus']),
       audioStoragePath: _readNullableString(map['audio_storage_path'] ?? map['audioStoragePath']),
+      recordings: (map['recordings'] as List? ?? const [])
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList(growable: false),
     );
   }
 
@@ -243,6 +251,7 @@ class MobileNote {
     String? transcriptionStatus,
     String? audioStorageStatus,
     String? audioStoragePath,
+    List<Map<String, dynamic>>? recordings,
   }) {
     return MobileNote(
       mobileNoteId: mobileNoteId ?? this.mobileNoteId,
@@ -286,6 +295,7 @@ class MobileNote {
       transcriptionStatus: transcriptionStatus ?? this.transcriptionStatus,
       audioStorageStatus: audioStorageStatus ?? this.audioStorageStatus,
       audioStoragePath: audioStoragePath ?? this.audioStoragePath,
+      recordings: recordings ?? this.recordings,
     );
   }
 

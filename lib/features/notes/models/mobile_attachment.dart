@@ -33,6 +33,8 @@ class MobileAttachment {
     this.durationSeconds,
     this.source = 'mobile',
     this.isSharedFile = false,
+    this.recordingId,
+    this.segmentIndex,
   });
 
   final String mobileAttachmentId;
@@ -64,6 +66,8 @@ class MobileAttachment {
   final int? durationSeconds;
   final String source;
   final bool isSharedFile;
+  final String? recordingId;
+  final int? segmentIndex;
 
   bool get isImage => mimeType.startsWith('image/');
   bool get isUploaded => syncStatus == SyncStatus.uploaded || syncStatus == SyncStatus.imported;
@@ -99,6 +103,8 @@ class MobileAttachment {
       'duration_seconds': durationSeconds,
       'source': source,
       'is_shared_file': isSharedFile,
+      'recording_id': recordingId,
+      'segment_index': segmentIndex,
     };
   }
 
@@ -133,6 +139,8 @@ class MobileAttachment {
       durationSeconds: _readNullableInt(map['duration_seconds'] ?? map['durationSeconds']),
       source: _readNullableString(map['source']) ?? 'mobile',
       isSharedFile: _readBool(map['is_shared_file'] ?? map['isSharedFile']),
+      recordingId: _readNullableString(map['recording_id'] ?? map['recordingId']),
+      segmentIndex: _readNullableInt(map['segment_index'] ?? map['segmentIndex']),
     );
   }
 
@@ -166,6 +174,8 @@ class MobileAttachment {
     int? durationSeconds,
     String? source,
     bool? isSharedFile,
+    String? recordingId,
+    int? segmentIndex,
     bool clearErrorMessage = false,
   }) {
     return MobileAttachment(
@@ -198,6 +208,8 @@ class MobileAttachment {
       durationSeconds: durationSeconds ?? this.durationSeconds,
       source: source ?? this.source,
       isSharedFile: isSharedFile ?? this.isSharedFile,
+      recordingId: recordingId ?? this.recordingId,
+      segmentIndex: segmentIndex ?? this.segmentIndex,
     );
   }
 

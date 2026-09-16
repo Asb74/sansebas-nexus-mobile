@@ -102,6 +102,11 @@ class AttachmentService {
     String source = 'mobile',
     bool isSharedFile = false,
     int? durationSeconds,
+    String? attachmentId,
+    String? recordingId,
+    int? segmentIndex,
+    String? storagePath,
+    SyncStatus syncStatus = SyncStatus.pending,
   }) async {
     final resolvedFilename = (filename == null || filename.trim().isEmpty) ? p.basename(path) : filename.trim();
     final resolvedMimeType = mimeType ?? lookupMimeType(path) ?? _guessMimeType(resolvedFilename);
@@ -109,14 +114,15 @@ class AttachmentService {
     _validateAttachment(filename: resolvedFilename, mimeType: resolvedMimeType, size: size);
     final extension = p.extension(resolvedFilename).replaceFirst('.', '').toLowerCase();
     return MobileAttachment(
-      mobileAttachmentId: _uuid.v4(),
+      mobileAttachmentId: attachmentId ?? _uuid.v4(),
       mobileNoteId: mobileNoteId,
       filename: resolvedFilename,
       mimeType: resolvedMimeType,
       localPath: path,
       size: size,
       createdAt: DateTime.now(),
-      syncStatus: SyncStatus.pending,
+      syncStatus: syncStatus,
+      storagePath: storagePath,
       captureMode: captureMode,
       optimizedForOcr: false,
       originalFilename: resolvedFilename,
@@ -127,6 +133,8 @@ class AttachmentService {
       durationSeconds: durationSeconds,
       source: source,
       isSharedFile: isSharedFile,
+      recordingId: recordingId,
+      segmentIndex: segmentIndex,
     );
   }
 

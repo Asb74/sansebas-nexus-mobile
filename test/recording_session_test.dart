@@ -50,6 +50,48 @@ void main() {
     expect(recovered.toJson()['updated_at'], isNotNull);
   });
 
+  test('groups four physical segments as one logical cloud recording', () {
+    final session = RecordingSession(
+      id: 'logical-1',
+      startedAt: DateTime.utc(2026, 9, 16),
+      status: RecordingSessionStatus.errorRecoverable,
+      segments: List.generate(4, (index) => RecordingSegment(
+        index: index,
+        localAudioPath: '/private/segment_000$index.m4a',
+        durationSeconds: 60,
+        sizeBytes: 1024,
+      )),
+    );
+    final metadata = session.toCloudMetadata();
+    expect(metadata['recording_id'], 'logical-1');
+    expect(metadata['segment_count'], 4);
+    expect(metadata['total_size_bytes'], 4096);
+    expect(metadata.toString(), isNot(contains('/private/')));
+    expect(metadata['transcription_status'], 'failed');
+  });
+
+  test('uploaded segments survive restart and only pending audio is retained', () async {
+    final audio = File('${temporary.path}/audio.m4a');
+    await audio.writeAsBytes(List<int>.filled(128, 1));
+    final session = RecordingSession(
+      id: 'upload-recovery', startedAt: DateTime.utc(2026),
+      status: RecordingSessionStatus.ready, transcriptionApplied: true,
+      segments: [RecordingSegment(index: 0, localAudioPath: audio.path,
+        durationSeconds: 1, sizeBytes: 128, uploadStatus: AudioUploadStatus.failed)],
+    );
+    await store.save(session);
+    expect((await store.pendingSessions()).single.id, 'upload-recovery');
+    await store.deleteSession(session);
+    expect(await audio.exists(), isTrue);
+
+    final uploaded = session.copyWith(segments: [session.segments.single.copyWith(
+      uploadStatus: AudioUploadStatus.uploaded,
+      storagePath: 'users/u/nexus_mobile_notes/n/audio/upload-recovery/segment_0000.m4a',
+    )]);
+    await store.save(uploaded);
+    expect(await store.pendingSessions(), isEmpty);
+  });
+
   test('appends transcription without losing manual or prior content', () {
     expect(appendTranscriptionToContent('', 'Audio uno.'), 'Audio uno.');
     expect(appendTranscriptionToContent('Texto manual.', 'Audio uno.'),
