@@ -94,6 +94,7 @@ class FirebaseSyncService {
   Future<void> createNoteWithAttachments({
     required MobileNote note,
     required List<MobileAttachment> attachments,
+    Future<void> Function(MobileAttachment uploaded)? onAttachmentUploaded,
   }) async {
     if (attachments.isEmpty) {
       await createTextNote(note);
@@ -123,11 +124,18 @@ class FirebaseSyncService {
       await docRef.set(noteToSave.toMap());
       debugPrint('FIRESTORE_AUDIO_DEBUG: write completed stage=initial_note_create');
 
-      for (final attachment in attachments) {
+      final uploadedAttachments = <MobileAttachment>[];
+      uploadedAttachments.addAll(
+        attachments.where((item) => item.isUploaded && item.storagePath != null),
+      );
+      for (final attachment in attachmentsPendingUpload(attachments)) {
         final storageFilename = attachment.captureMode == 'document_scan' && attachment.documentFormat == 'pdf'
             ? '${attachment.mobileAttachmentId}_scan.pdf'
             : '${attachment.mobileAttachmentId}_${attachment.filename}';
-        final storagePath = 'users/$uid/$notesCollection/${noteToSave.mobileNoteId}/$storageFilename';
+        final storagePath = attachment.recordingId == null
+            ? 'users/$uid/$notesCollection/${noteToSave.mobileNoteId}/$storageFilename'
+            : 'users/$uid/$notesCollection/${noteToSave.mobileNoteId}/audio/'
+                '${attachment.recordingId}/segment_${(attachment.segmentIndex ?? 0).toString().padLeft(4, '0')}.m4a';
         debugPrint('attachmentId: ${attachment.mobileAttachmentId}');
         debugPrint('storagePath: $storagePath');
 
@@ -142,21 +150,29 @@ class FirebaseSyncService {
           importedAt: null,
           clearErrorMessage: true,
         );
-        debugPrint('FIRESTORE_AUDIO_DEBUG: write requested stage=attachment_metadata');
-        await docRef
-            .collection('attachments')
-            .doc(uploadedAttachment.mobileAttachmentId)
-            .set(uploadedAttachment.toMap()..remove('local_path'));
-        debugPrint('FIRESTORE_AUDIO_DEBUG: write completed stage=attachment_metadata');
+        uploadedAttachments.add(uploadedAttachment);
+        await onAttachmentUploaded?.call(uploadedAttachment);
       }
 
-      debugPrint('FIRESTORE_AUDIO_DEBUG: write requested stage=final_note_update');
-      await docRef.update({
+      // Commit attachment references and the final note state together. Upload
+      // byte progress is deliberately kept out of Firestore.
+      final batch = _firestore.batch();
+      for (final attachment in uploadedAttachments) {
+        final metadata = attachment.toMap()..remove('local_path');
+        batch.set(docRef.collection('attachments').doc(attachment.mobileAttachmentId), metadata);
+      }
+      batch.update(docRef, {
         'sync_status': SyncStatus.uploaded.value,
-        'attachments_count': attachments.length,
+        'attachments_count': uploadedAttachments.length,
+        'recordings': mergeUploadedRecordingMetadata(note.recordings, uploadedAttachments),
+        'audio_storage_status': uploadedAttachments.any((item) => item.recordingId != null)
+            ? 'uploaded'
+            : note.audioStorageStatus,
         'updated_at': DateTime.now().toIso8601String(),
         'error_message': null,
       });
+      debugPrint('FIRESTORE_AUDIO_DEBUG: write requested stage=final_metadata_batch');
+      await batch.commit();
       debugPrint('FIRESTORE_AUDIO_DEBUG: write completed stage=final_note_update');
     } on FirebaseException catch (error) {
       debugPrint('Error exacto subiendo nota/adjunto: ${error.code} ${error.message}');
@@ -249,3 +265,39 @@ class FirebaseSyncException implements Exception {
 }
 
 enum FirebaseSyncExceptionKind { permissionDenied, connection, attachmentUpload, unknown }
+
+List<MobileAttachment> attachmentsPendingUpload(List<MobileAttachment> attachments) =>
+    attachments
+        .where((item) => !item.isUploaded || item.storagePath == null)
+        .toList(growable: false);
+
+/// Replaces local-only segment state with authenticated Storage references.
+/// Kept pure so retries and desktop-contract serialization can be tested.
+List<Map<String, dynamic>> mergeUploadedRecordingMetadata(
+  List<Map<String, dynamic>> recordings,
+  List<MobileAttachment> attachments,
+) {
+  return recordings.map((recording) {
+    final recordingId = recording['recording_id'] as String?;
+    final audio = attachments
+        .where((item) => item.recordingId == recordingId)
+        .toList()
+      ..sort((a, b) => (a.segmentIndex ?? 0).compareTo(b.segmentIndex ?? 0));
+    if (audio.isEmpty) return Map<String, dynamic>.from(recording);
+    return <String, dynamic>{
+      ...recording,
+      'upload_status': audio.every((item) => item.isUploaded) ? 'uploaded' : 'failed',
+      'segment_count': audio.length,
+      'total_size_bytes': audio.fold<int>(0, (sum, item) => sum + item.size),
+      'segments': audio.map((item) => <String, dynamic>{
+        'index': item.segmentIndex,
+        'filename': item.filename,
+        'mime_type': item.mimeType,
+        'size_bytes': item.size,
+        'duration_seconds': item.durationSeconds,
+        'storage_path': item.storagePath,
+        'upload_status': item.isUploaded ? 'uploaded' : 'failed',
+      }).toList(growable: false),
+    };
+  }).toList(growable: false);
+}

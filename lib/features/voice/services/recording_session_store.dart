@@ -66,7 +66,9 @@ class RecordingSessionStore {
       if (!await file.exists()) continue;
       try {
         final session = RecordingSession.fromJson(jsonDecode(await file.readAsString()) as Map<String, dynamic>);
-        if (session.status != RecordingSessionStatus.ready || !session.transcriptionApplied) {
+        if (session.status != RecordingSessionStatus.ready ||
+            !session.transcriptionApplied ||
+            session.uploadStatus != AudioUploadStatus.uploaded) {
           result.add(session);
         }
       } catch (_) {
@@ -107,7 +109,7 @@ class RecordingSessionStore {
   }
 
   Future<void> deleteSession(RecordingSession session) async {
-    if (session.status != RecordingSessionStatus.ready || !session.transcriptionApplied) return;
+    if (session.uploadStatus != AudioUploadStatus.uploaded) return;
     final root = await _directoryProvider();
     final directory = Directory('${root.path}/recordings/${session.id}');
     if (await directory.exists()) await directory.delete(recursive: true);

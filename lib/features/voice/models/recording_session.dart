@@ -32,6 +32,21 @@ enum RecordingSegmentStatus {
       );
 }
 
+enum AudioUploadStatus {
+  localOnly('local_only'),
+  uploading('uploading'),
+  uploaded('uploaded'),
+  failed('failed');
+
+  const AudioUploadStatus(this.value);
+  final String value;
+
+  static AudioUploadStatus fromValue(String? value) => values.firstWhere(
+        (status) => status.value == value || status.name == value,
+        orElse: () => AudioUploadStatus.localOnly,
+      );
+}
+
 class RecordingSegment {
   const RecordingSegment({
     required this.index,
@@ -40,6 +55,8 @@ class RecordingSegment {
     this.sizeBytes = 0,
     this.status = RecordingSegmentStatus.pending,
     this.transcription,
+    this.uploadStatus = AudioUploadStatus.localOnly,
+    this.storagePath,
   });
 
   final int index;
@@ -48,16 +65,23 @@ class RecordingSegment {
   final int sizeBytes;
   final RecordingSegmentStatus status;
   final String? transcription;
+  final AudioUploadStatus uploadStatus;
+  final String? storagePath;
+
+  String get filename => localAudioPath.split(RegExp(r'[/\\]')).last;
 
   bool get isTranscribed => transcription?.trim().isNotEmpty ?? false;
 
-  RecordingSegment copyWith({String? transcription, RecordingSegmentStatus? status}) => RecordingSegment(
+  RecordingSegment copyWith({String? transcription, RecordingSegmentStatus? status,
+        AudioUploadStatus? uploadStatus, String? storagePath}) => RecordingSegment(
         index: index,
         localAudioPath: localAudioPath,
         durationSeconds: durationSeconds,
         sizeBytes: sizeBytes,
         status: status ?? this.status,
         transcription: transcription ?? this.transcription,
+        uploadStatus: uploadStatus ?? this.uploadStatus,
+        storagePath: storagePath ?? this.storagePath,
       );
 
   Map<String, dynamic> toJson() => {
@@ -67,6 +91,10 @@ class RecordingSegment {
         'size_bytes': sizeBytes,
         'state': status.value,
         'transcription': transcription,
+        'filename': filename,
+        'mime_type': 'audio/mp4',
+        'upload_status': uploadStatus.value,
+        'storage_path': storagePath,
       };
 
   factory RecordingSegment.fromJson(Map<String, dynamic> json) => RecordingSegment(
@@ -78,6 +106,8 @@ class RecordingSegment {
             ? RecordingSegmentStatus.completed
             : RecordingSegmentStatus.fromValue(json['state'] as String?),
         transcription: json['transcription'] as String?,
+        uploadStatus: AudioUploadStatus.fromValue(json['upload_status'] as String?),
+        storagePath: json['storage_path'] as String?,
       );
 }
 
@@ -103,6 +133,22 @@ class RecordingSession {
   final String? noteId;
 
   int get durationSeconds => segments.fold(0, (total, item) => total + item.durationSeconds);
+  int get totalSizeBytes => segments.fold(0, (total, item) => total + item.sizeBytes);
+  AudioUploadStatus get uploadStatus {
+    if (segments.isNotEmpty && segments.every((item) => item.uploadStatus == AudioUploadStatus.uploaded)) {
+      return AudioUploadStatus.uploaded;
+    }
+    if (segments.any((item) => item.uploadStatus == AudioUploadStatus.failed)) return AudioUploadStatus.failed;
+    if (segments.any((item) => item.uploadStatus == AudioUploadStatus.uploading)) return AudioUploadStatus.uploading;
+    return AudioUploadStatus.localOnly;
+  }
+  String get transcriptionStatus => switch (status) {
+        RecordingSessionStatus.ready => 'completed',
+        RecordingSessionStatus.errorRecoverable => 'failed',
+        RecordingSessionStatus.transcribing => 'transcribing',
+        RecordingSessionStatus.recording ||
+        RecordingSessionStatus.pendingTranscription => 'pending',
+      };
   String get transcription => (segments.toList()..sort((a, b) => a.index.compareTo(b.index)))
       .map((segment) => segment.transcription?.trim() ?? '')
       .where((text) => text.isNotEmpty)
@@ -134,9 +180,33 @@ class RecordingSession {
         'segments': segments.map((item) => item.toJson()).toList(),
         'error_message': errorMessage,
         'duration_seconds': durationSeconds,
+        'total_size_bytes': totalSizeBytes,
+        'segment_count': segments.length,
+        'upload_status': uploadStatus.value,
         'transcription': transcription,
         'transcription_applied': transcriptionApplied,
         'note_id': noteId,
+      };
+
+  Map<String, dynamic> toCloudMetadata() => {
+        'recording_id': id,
+        'created_at': startedAt.toUtc().toIso8601String(),
+        'duration_seconds_total': durationSeconds,
+        'total_size_bytes': totalSizeBytes,
+        'segment_count': segments.length,
+        'transcription_status': transcriptionStatus,
+        'upload_status': uploadStatus.value,
+        'segments': (segments.toList()..sort((a, b) => a.index.compareTo(b.index)))
+            .map((segment) => {
+                  'index': segment.index,
+                  'filename': segment.filename,
+                  'mime_type': 'audio/mp4',
+                  'size_bytes': segment.sizeBytes,
+                  'duration_seconds': segment.durationSeconds,
+                  'storage_path': segment.storagePath,
+                  'upload_status': segment.uploadStatus.value,
+                })
+            .toList(growable: false),
       };
 
   factory RecordingSession.fromJson(Map<String, dynamic> json) => RecordingSession(
