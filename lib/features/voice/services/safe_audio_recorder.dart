@@ -7,6 +7,7 @@ import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/recording_session.dart';
+import 'audio_limits.dart';
 import 'recording_session_store.dart';
 
 String formatAudioDuration(Duration duration) {
@@ -20,9 +21,9 @@ String formatAudioDuration(Duration duration) {
 
 class AudioSegmentationPolicy {
   const AudioSegmentationPolicy({
-    this.segmentDuration = const Duration(minutes: 21),
+    this.segmentDuration = const Duration(seconds: 1245),
     this.bitsPerSecond = 128000,
-    this.safeBytes = 20 * 1024 * 1024,
+    this.safeBytes = recordingSegmentTargetBytes,
   });
 
   final Duration segmentDuration;
@@ -88,14 +89,14 @@ const _audioBitRate = 128000;
 const _minimumAudioBytes = 1024;
 const _minimumAudioBytesPerSecond = 512;
 
-/// Records a voice note into bounded local files. Twenty-one minutes of
-/// 128-kbit AAC remains below 20 MiB. Normal recordings are therefore sent as
-/// one complete file, while longer recordings retain the rollover strategy.
+/// Records a voice note into bounded local files. Rotation targets 19 MiB at
+/// 128-kbit AAC instead of the server's hard 20 MiB limit, leaving headroom for
+/// variable bitrate and M4A finalization metadata.
 class SafeAudioRecorder {
   SafeAudioRecorder({
     required RecordingSessionStore store,
     required AudioRecorderAdapter recorder,
-    this.segmentDuration = const Duration(minutes: 21),
+    this.segmentDuration = const Duration(seconds: 1245),
     Uuid uuid = const Uuid(),
     AndroidRecordingForegroundService? foregroundService,
   })  : _store = store,
@@ -233,7 +234,8 @@ class SafeAudioRecorder {
       }),
     );
     final originalSize = segmentFiles.fold<int>(0, (total, size) => total + size);
-    debugPrint('AUDIO_SEGMENTATION: threshold_bytes=${20 * 1024 * 1024}');
+    debugPrint('AUDIO_SEGMENTATION: target_bytes=$recordingSegmentTargetBytes');
+    debugPrint('AUDIO_SEGMENTATION: server_max_bytes=$serverMaxAudioBytes');
     debugPrint('AUDIO_SEGMENTATION: original_size_bytes=$originalSize');
     debugPrint('AUDIO_SEGMENTATION: segment_count=${completed.segments.length}');
     for (var index = 0; index < completed.segments.length; index++) {
@@ -246,11 +248,11 @@ class SafeAudioRecorder {
   }
 }
 
-const int productionAudioSegmentationThresholdBytes = 20 * 1024 * 1024;
-
 Duration configuredAudioSegmentDuration() {
-  const configured = int.fromEnvironment('AUDIO_SEGMENTATION_THRESHOLD_BYTES', defaultValue: productionAudioSegmentationThresholdBytes);
-  final threshold = kDebugMode ? configured : productionAudioSegmentationThresholdBytes;
+  const configured = int.fromEnvironment('AUDIO_SEGMENTATION_TARGET_BYTES', defaultValue: recordingSegmentTargetBytes);
+  final threshold = kDebugMode
+      ? configured.clamp(1, recordingSegmentTargetBytes)
+      : recordingSegmentTargetBytes;
   final seconds = (threshold * 8 / _audioBitRate).floor();
   return Duration(seconds: seconds < 1 ? 1 : seconds);
 }

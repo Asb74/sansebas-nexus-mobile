@@ -21,15 +21,59 @@ enum RecordingSessionStatus {
 
 enum RecordingSegmentStatus {
   pending,
+  requiresResegmentation,
   transcribing,
   completed,
   failed;
 
-  String get value => name;
+  String get value => switch (this) {
+        RecordingSegmentStatus.requiresResegmentation => 'requires_resegmentation',
+        _ => name,
+      };
   static RecordingSegmentStatus fromValue(String? value) => values.firstWhere(
-        (status) => status.name == value,
+        (status) => status.name == value || status.value == value,
         orElse: () => RecordingSegmentStatus.pending,
       );
+}
+
+class RecordingRecoveryPart {
+  const RecordingRecoveryPart({
+    required this.index,
+    required this.localAudioPath,
+    required this.durationSeconds,
+    required this.sizeBytes,
+    this.status = RecordingSegmentStatus.pending,
+    this.transcription,
+  });
+
+  final int index;
+  final String localAudioPath;
+  final int durationSeconds;
+  final int sizeBytes;
+  final RecordingSegmentStatus status;
+  final String? transcription;
+
+  bool get isTranscribed => transcription?.trim().isNotEmpty ?? false;
+
+  RecordingRecoveryPart copyWith({RecordingSegmentStatus? status, String? transcription}) =>
+      RecordingRecoveryPart(index: index, localAudioPath: localAudioPath,
+        durationSeconds: durationSeconds, sizeBytes: sizeBytes,
+        status: status ?? this.status, transcription: transcription ?? this.transcription);
+
+  Map<String, dynamic> toJson() => {
+    'index': index, 'local_audio_path': localAudioPath,
+    'duration_seconds': durationSeconds, 'size_bytes': sizeBytes,
+    'state': status.value, 'transcription': transcription,
+  };
+
+  factory RecordingRecoveryPart.fromJson(Map<String, dynamic> json) => RecordingRecoveryPart(
+    index: (json['index'] as num?)?.toInt() ?? 0,
+    localAudioPath: json['local_audio_path'] as String? ?? '',
+    durationSeconds: (json['duration_seconds'] as num?)?.toInt() ?? 0,
+    sizeBytes: (json['size_bytes'] as num?)?.toInt() ?? 0,
+    status: RecordingSegmentStatus.fromValue(json['state'] as String?),
+    transcription: json['transcription'] as String?,
+  );
 }
 
 enum AudioUploadStatus {
@@ -57,6 +101,7 @@ class RecordingSegment {
     this.transcription,
     this.uploadStatus = AudioUploadStatus.localOnly,
     this.storagePath,
+    this.recoveryParts = const [],
   });
 
   final int index;
@@ -67,21 +112,31 @@ class RecordingSegment {
   final String? transcription;
   final AudioUploadStatus uploadStatus;
   final String? storagePath;
+  final List<RecordingRecoveryPart> recoveryParts;
 
   String get filename => localAudioPath.split(RegExp(r'[/\\]')).last;
 
-  bool get isTranscribed => transcription?.trim().isNotEmpty ?? false;
+  bool get isTranscribed => recoveryParts.isNotEmpty
+      ? recoveryParts.every((part) => part.isTranscribed)
+      : (transcription?.trim().isNotEmpty ?? false);
+
+  String get completeTranscription => recoveryParts.isEmpty
+      ? (transcription?.trim() ?? '')
+      : (recoveryParts.toList()..sort((a, b) => a.index.compareTo(b.index)))
+          .map((part) => part.transcription?.trim() ?? '').where((text) => text.isNotEmpty).join('\n\n');
 
   RecordingSegment copyWith({String? transcription, RecordingSegmentStatus? status,
-        AudioUploadStatus? uploadStatus, String? storagePath}) => RecordingSegment(
+        AudioUploadStatus? uploadStatus, String? storagePath,
+        List<RecordingRecoveryPart>? recoveryParts, int? sizeBytes}) => RecordingSegment(
         index: index,
         localAudioPath: localAudioPath,
         durationSeconds: durationSeconds,
-        sizeBytes: sizeBytes,
+        sizeBytes: sizeBytes ?? this.sizeBytes,
         status: status ?? this.status,
         transcription: transcription ?? this.transcription,
         uploadStatus: uploadStatus ?? this.uploadStatus,
         storagePath: storagePath ?? this.storagePath,
+        recoveryParts: recoveryParts ?? this.recoveryParts,
       );
 
   Map<String, dynamic> toJson() => {
@@ -95,6 +150,7 @@ class RecordingSegment {
         'mime_type': 'audio/mp4',
         'upload_status': uploadStatus.value,
         'storage_path': storagePath,
+        'recovery_parts': recoveryParts.map((part) => part.toJson()).toList(),
       };
 
   factory RecordingSegment.fromJson(Map<String, dynamic> json) => RecordingSegment(
@@ -108,6 +164,8 @@ class RecordingSegment {
         transcription: json['transcription'] as String?,
         uploadStatus: AudioUploadStatus.fromValue(json['upload_status'] as String?),
         storagePath: json['storage_path'] as String?,
+        recoveryParts: (json['recovery_parts'] as List? ?? const []).whereType<Map>()
+            .map((part) => RecordingRecoveryPart.fromJson(Map<String, dynamic>.from(part))).toList(),
       );
 }
 
@@ -150,7 +208,7 @@ class RecordingSession {
         RecordingSessionStatus.pendingTranscription => 'pending',
       };
   String get transcription => (segments.toList()..sort((a, b) => a.index.compareTo(b.index)))
-      .map((segment) => segment.transcription?.trim() ?? '')
+      .map((segment) => segment.completeTranscription)
       .where((text) => text.isNotEmpty)
       .join('\n\n');
 

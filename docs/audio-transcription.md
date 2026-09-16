@@ -64,16 +64,20 @@ Cada captura se conserva en `app_flutter/recordings/<UUID>/`. Su `session.json`
 es un manifiesto local escrito mediante temporal y copia de respaldo, con UUID,
 fechas, estado, duración, asociación a la nota, error, transcripción,
 `transcription_applied` y estado/ruta/tamaño/transcripción de cada segmento.
+Los segmentos recuperados pueden incluir `recovery_parts` con índice explícito,
+ruta, tamaño, duración, estado y texto persistido de cada parte.
 Firestore no se usa como journal y los errores recuperables no eliminan audio.
 
 Los segmentos no son cortes de bytes: el recorder se detiene y finaliza cada
 contenedor M4A antes de iniciar el siguiente. Cada archivo enviado es por ello
 un M4A autocontenido. Los segmentos completados se omiten al reintentar y sus
-textos se unen por índice. En DEBUG se puede reducir el rollover sin alterar el
-límite de producción de 20 MiB:
+textos se unen por índice. El límite del servidor permanece en 20 MiB y el
+recorder rota con un objetivo de 19 MiB (1 MiB de margen para variación de
+bitrate y cierre del contenedor). En DEBUG se puede reducir el rollover sin
+superar ese objetivo:
 
 ```sh
-flutter run --dart-define=AUDIO_SEGMENTATION_THRESHOLD_BYTES=150000 \
+flutter run --dart-define=AUDIO_SEGMENTATION_TARGET_BYTES=150000 \
   --dart-define=AUDIO_TRANSCRIPTION_ENDPOINT=<URL>
 ```
 
@@ -82,6 +86,12 @@ con notificación persistente. `paused` e `inactive` no detienen la grabación.
 Un Force Stop explícito puede detener cualquier servicio Android; al arrancar
 se buscan M4A finalizados y las sesiones huérfanas pasan a error recuperable.
 Una transcripción persistida y aún no aplicada se añade una sola vez.
+
+Al reintentar una sesión antigua, todo original mayor de 20 MiB se remultiplexa
+por tiempo mediante `MediaExtractor`/`MediaMuxer` (Android) o
+`AVAssetExportSession` (iOS). No se cortan rangos arbitrarios de bytes. Las
+partes nuevas se validan antes de persistirse y los originales no se borran ni
+se sobrescriben.
 
 ## Checklist manual Android
 
@@ -94,3 +104,8 @@ Una transcripción persistida y aún no aplicada se añade una sola vez.
 7. Matar el proceso tras persistir la respuesta y comprobar una única aplicación.
 8. Probar `adb shell am kill com.sansebas.nexus.mobile` y, por separado,
    Force Stop desde Ajustes, sin esperar que este último mantenga el servicio.
+9. Para la sesión real de 01:13:06: conservar su directorio, abrir la app,
+   aceptar la recuperación y pulsar **Reintentar transcripción**. Verificar en
+   logs tres acciones `AUDIO_RECOVERY ... action=resegment`, respuestas 200 en
+   orden original/parte y `logical_recording completed`; comprobar después que
+   los cuatro `segment_000N.m4a` originales siguen presentes.

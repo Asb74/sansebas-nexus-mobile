@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:mime/mime.dart';
 
 import '../models/recording_session.dart';
+import 'audio_limits.dart';
+import 'audio_recovery_service.dart';
 import 'recording_session_store.dart';
 
 abstract interface class AudioSegmentTranscriber {
@@ -87,6 +89,13 @@ class HttpAudioSegmentTranscriber implements AudioSegmentTranscriber {
         'AUDIO_TRANSCRIPTION: request not started reason=local_audio_invalid',
       );
       throw const AudioTranscriptionException('local_audio_invalid');
+    }
+    if (requiresAudioResegmentation(size)) {
+      debugPrint('AUDIO_TRANSCRIPTION: segment too large');
+      debugPrint('AUDIO_TRANSCRIPTION: size_bytes=$size');
+      debugPrint('AUDIO_TRANSCRIPTION: max_bytes=$serverMaxAudioBytes');
+      debugPrint('AUDIO_TRANSCRIPTION: resegmentation_required=true');
+      throw const AudioTranscriptionException('requires_resegmentation');
     }
 
     try {
@@ -202,12 +211,15 @@ String _redactSecrets(String value) => value
     );
 
 class AudioTranscriptionService {
-  AudioTranscriptionService({required RecordingSessionStore store, required AudioSegmentTranscriber transcriber})
+  AudioTranscriptionService({required RecordingSessionStore store, required AudioSegmentTranscriber transcriber,
+      AudioRecoveryService? recoveryService})
       : _store = store,
-        _transcriber = transcriber;
+        _transcriber = transcriber,
+        _recoveryService = recoveryService ?? AudioRecoveryService(store: store);
 
   final RecordingSessionStore _store;
   final AudioSegmentTranscriber _transcriber;
+  final AudioRecoveryService _recoveryService;
   final Set<String> _activeSessions = <String>{};
 
   Future<RecordingSession> transcribe(RecordingSession session) async {
@@ -218,26 +230,50 @@ class AudioTranscriptionService {
     debugPrint('AUDIO_SESSION: retry_pending_segments=${current.segments.where((segment) => !segment.isTranscribed).length}');
     debugPrint('AUDIO_TRANSCRIPTION: segmentation_started segments=${current.segments.length}');
     try {
+      current = await _recoveryService.prepare(current);
       final ordered = current.segments.toList()..sort((a, b) => a.index.compareTo(b.index));
       for (var position = 0; position < ordered.length; position++) {
-        final segment = ordered[position];
+        var segment = ordered[position];
         if (segment.isTranscribed) continue;
-        ordered[position] = segment.copyWith(status: RecordingSegmentStatus.transcribing);
-        current = current.copyWith(segments: List.unmodifiable(ordered));
-        await _store.save(current);
-        debugPrint('AUDIO_TRANSCRIPTION: segment index=${segment.index + 1} started');
-        final text = await _transcriber.transcribe(segment.localAudioPath);
-        ordered[position] = segment.copyWith(transcription: text, status: RecordingSegmentStatus.completed);
+        if (segment.recoveryParts.isNotEmpty) {
+          final parts = segment.recoveryParts.toList()..sort((a, b) => a.index.compareTo(b.index));
+          for (var partPosition = 0; partPosition < parts.length; partPosition++) {
+            final part = parts[partPosition];
+            if (part.isTranscribed) continue;
+            parts[partPosition] = part.copyWith(status: RecordingSegmentStatus.transcribing);
+            ordered[position] = segment.copyWith(status: RecordingSegmentStatus.transcribing,
+              recoveryParts: List.unmodifiable(parts));
+            current = current.copyWith(segments: List.unmodifiable(ordered));
+            await _store.save(current);
+            debugPrint('AUDIO_TRANSCRIPTION: original_segment=${segment.index} part=${part.index} started');
+            final text = await _transcriber.transcribe(part.localAudioPath);
+            parts[partPosition] = part.copyWith(transcription: text, status: RecordingSegmentStatus.completed);
+            segment = segment.copyWith(recoveryParts: List.unmodifiable(parts));
+            ordered[position] = segment;
+            current = current.copyWith(segments: List.unmodifiable(ordered));
+            await _store.save(current);
+            debugPrint('AUDIO_TRANSCRIPTION: original_segment=${segment.index} part=${part.index} response status=200');
+          }
+          ordered[position] = segment.copyWith(status: RecordingSegmentStatus.completed);
+        } else {
+          ordered[position] = segment.copyWith(status: RecordingSegmentStatus.transcribing);
+          current = current.copyWith(segments: List.unmodifiable(ordered));
+          await _store.save(current);
+          debugPrint('AUDIO_TRANSCRIPTION: segment index=${segment.index + 1} started');
+          final text = await _transcriber.transcribe(segment.localAudioPath);
+          ordered[position] = segment.copyWith(transcription: text, status: RecordingSegmentStatus.completed);
+        }
         current = current.copyWith(segments: List.unmodifiable(ordered));
         await _store.save(current);
         debugPrint('AUDIO_TRANSCRIPTION: segment index=${segment.index + 1} status=completed');
-        debugPrint('AUDIO_TRANSCRIPTION: segment index=${segment.index + 1} chars=${text.length}');
+        debugPrint('AUDIO_TRANSCRIPTION: segment index=${segment.index + 1} chars=${ordered[position].completeTranscription.length}');
       }
       current = current.copyWith(status: RecordingSessionStatus.ready, clearError: true);
       await _store.save(current);
       debugPrint('AUDIO_SESSION: state=${current.status.value}');
       debugPrint('AUDIO_SESSION: transcription_saved chars=${current.transcription.length}');
       debugPrint('AUDIO_TRANSCRIPTION: completed chars=${current.transcription.length}');
+      debugPrint('AUDIO_TRANSCRIPTION: logical_recording completed');
       return current;
     } catch (error, stackTrace) {
       final failedSegments = current.segments
